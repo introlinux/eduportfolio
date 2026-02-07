@@ -1,0 +1,55 @@
+{
+  "name": "eduportfolio-web",
+  "version": "0.3.0",
+  "description": "Sistema de captura y clasificación de evidencias educativas - Fase 3 (OpenCV)",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node src/server.js",
+    "test": "jest",
+    "rebuild": "electron-rebuild",
+    "electron:dev": "electron src/main.js",
+    "electron:build": "npm run rebuild && electron-builder"
+  },
+  "dependencies": {
+    "@tensorflow/tfjs": "^4.11.0",
+    "body-parser": "^1.20.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.0.3",
+    "express": "^4.18.2",
+    "face-api.js": "^0.22.2",
+    "sqlite3": "^5.1.7",
+    "tesseract.js": "^4.1.1"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^4.0.3",
+    "electron": "^33.4.11",
+    "electron-builder": "^26.4.0",
+    "electron-packager": "^17.1.2",
+    "jest": "^30.2.0"
+  },
+  "keywords": [
+    "education",
+    "portfolio",
+    "ai",
+    "face-recognition"
+  ],
+  "author": "Antonio Sánchez León <introlinux@gmail.com>",
+  "license": "MIT",
+  "build": {
+    "appId": "com.eduportfolio.app",
+    "productName": "EduPortfolio",
+    "directories": {
+      "output": "dist"
+    },
+    "npmRebuild": false,
+    "win": {
+      "target": "nsis"
+    },
+    "asar": true,
+    "asarUnpack": [
+      "**/*.node",
+      "node_modules/sqlite3/**/*"
+    ]
+  }
+}

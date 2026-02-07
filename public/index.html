@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EduPortfolio - Fase 3 (Cabina de Fotos)</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+  <!-- VISTA 1: SELECTOR DE ASIGNATURA -->
+  <div id="subjectSelector" class="view active">
+    <div class="selector-container">
+      <h1>📚 Selecciona la Asignatura</h1>
+      <div class="subject-grid">
+        <button class="subject-btn" data-subject="Matematicas" onclick="selectSubject('Matematicas')">
+          <span class="subject-icon">🔢</span>
+          <span class="subject-name">Matemáticas</span>
+        </button>
+        <button class="subject-btn" data-subject="Lengua" onclick="selectSubject('Lengua')">
+          <span class="subject-icon">📖</span>
+          <span class="subject-name">Lengua</span>
+        </button>
+        <button class="subject-btn" data-subject="Ciencias" onclick="selectSubject('Ciencias')">
+          <span class="subject-icon">🔬</span>
+          <span class="subject-name">Ciencias</span>
+        </button>
+        <button class="subject-btn" data-subject="Ingles" onclick="selectSubject('Ingles')">
+          <span class="subject-icon">🇬🇧</span>
+          <span class="subject-name">Inglés</span>
+        </button>
+        <button class="subject-btn" data-subject="Artistica" onclick="selectSubject('Artistica')">
+          <span class="subject-icon">🎨</span>
+          <span class="subject-name">Artística</span>
+        </button>
+      </div>
+      <div class="selector-footer">
+        <small>Pulsa P para el Panel de Profesor y G para la Galería</small>
+      </div>
+    </div>
+  </div>
+
+  <!-- VISTA 2: CAPTURA (ALUMNADO) -->
+  <div id="captureView" class="view">
+    <div class="video-fullscreen">
+      <video id="webcam" autoplay playsinline></video>
+      <canvas id="canvas" style="display: none;"></canvas>
+
+      <!-- Indicador de asignatura -->
+      <div id="subjectIndicator" class="subject-indicator">
+        <span id="currentSubject">Matemáticas</span>
+      </div>
+
+      <!-- Overlay de mensajes -->
+      <div id="messageOverlay" class="message-overlay">
+        <div id="messageText" class="message-text"></div>
+      </div>
+
+      <!-- Cuenta atrás -->
+      <div id="countdownOverlay" class="countdown-overlay">
+        <div id="countdownNumber" class="countdown-number"></div>
+      </div>
+
+      <!-- Efecto Flash -->
+      <div id="flashOverlay" class="flash-overlay"></div>
+
+      <!-- Indicador Modo Rápido -->
+      <div id="quickModeIndicator" class="quick-mode-indicator" style="display: none;">
+        ⚡ MODO RÁPIDO ACTIVADO (Pulsa ESPACIO para capturar)
+      </div>
+    </div>
+
+    <!-- Ayuda de teclado -->
+    <div class="keyboard-help">
+      <span>(P) Panel Profesor</span>
+      <span>(G) Galería</span>
+      <span>(ESC) Volver</span>
+    </div>
+  </div>
+
+  <!-- VISTA 3: PROFESOR -->
+  <div id="teacherView" class="view">
+    <div class="teacher-container">
+      <h1>👨‍🏫 Panel del Profesor</h1>
+
+      <div class="teacher-section">
+        <h2>Gestión de Alumnos</h2>
+        <div class="form-group">
+          <input type="text" id="studentName" placeholder="Nombre del alumno">
+          <button onclick="addStudent()">Añadir Alumno</button>
+        </div>
+        <div id="studentsList" class="students-list"></div>
+      </div>
+
+      <div class="teacher-section">
+        <h2>Entrenamiento Facial</h2>
+        <div class="form-group">
+          <select id="selectedStudentTraining">
+            <option value="">-- Selecciona un alumno --</option>
+          </select>
+          <button onclick="startTrainingMode()">Entrenar Rostro</button>
+        </div>
+
+        <div id="trainingSection" style="display: none;">
+          <p>Captura 3-5 imágenes desde diferentes ángulos</p>
+
+          <!-- Vista previa de cámara para entrenamiento -->
+          <div class="training-video-container" style="margin: 1rem 0; text-align: center;">
+            <video id="trainingWebcam" autoplay playsinline
+              style="width: 100%; max-width: 480px; border-radius: 8px; border: 2px solid #333; background: #000;"></video>
+          </div>
+
+          <div id="trainingStatus">Imágenes capturadas: <span id="trainingCount">0</span>/5</div>
+          <button onclick="captureTrainingFace()">📸 Capturar Imagen</button>
+          <button onclick="stopTrainingMode()">Terminar</button>
+        </div>
+      </div>
+
+      <div class="teacher-section">
+        <h2>Mantenimiento del Sistema</h2>
+        <div class="maintenance-grid">
+          <div class="maintenance-card">
+            <h3>Sincronización</h3>
+            <p>Escanea la carpeta de portfolios para añadir alumnos o fotos nuevas.</p>
+            <button onclick="syncPortfolios()">🔄 Sincronizar Ahora</button>
+          </div>
+
+          <div class="maintenance-card">
+            <h3>Limpieza</h3>
+            <p>Elige qué quieres borrar:</p>
+            <div style="display: flex; gap: 10px;">
+              <button class="danger-btn" onclick="resetSystem('photos')" style="flex: 1;">🗑️ Solo Fotos</button>
+              <button class="danger-btn" onclick="resetSystem('students')" style="flex: 1;">👥 Solo Alumnos</button>
+            </div>
+          </div>
+
+          <div class="maintenance-card">
+            <h3>Fotos Externas</h3>
+            <p>Clasifica fotos añadidas a la carpeta <code>_temporal_</code>.</p>
+            <button onclick="openExternalPhotosWizard()">🔍 Clasificar Pendientes (<span
+                id="pendingCount">0</span>)</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Wizard de Clasificación Externa (Modal) -->
+      <div id="externalPhotosWizard" class="modal" style="display: none;">
+        <div class="modal-content">
+          <h2>🔍 Clasificación de Fotos Externas</h2>
+          <div id="wizardContent">
+            <div class="wizard-photo-container">
+              <img id="wizardImage" src="" alt="Pendiente"
+                style="max-width: 100%; max-height: 400px; border-radius: 10px;">
+              <canvas id="wizardCanvas" style="display: none;"></canvas>
+            </div>
+            <div class="wizard-controls">
+              <p id="wizardRecognitionStatus">Analizando rostro...</p>
+              <div class="form-group">
+                <select id="wizardStudentSelect">
+                  <option value="">-- Seleccionar Alumno --</option>
+                </select>
+                <select id="wizardSubjectSelect">
+                  <option value="Matematicas">Matemáticas</option>
+                  <option value="Lengua">Lengua</option>
+                  <option value="Ciencias">Ciencias</option>
+                  <option value="Ingles">Inglés</option>
+                  <option value="Artistica">Artística</option>
+                </select>
+                <button onclick="moveExternalPhoto()">📁 Mover a Portfolio</button>
+              </div>
+              <button class="secondary-btn" onclick="skipExternalPhoto()">Omitir</button>
+              <button class="secondary-btn" onclick="closeExternalPhotosWizard()">Cerrar</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="teacher-footer">
+        <button onclick="exitTeacherView()">← Volver (ESC)</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- VISTA 4: GALERÍA -->
+  <div id="galleryView" class="view">
+    <div class="gallery-layout">
+      <div class="gallery-header">
+        <h1>🖼️ Galería de Trabajos</h1>
+        <div class="gallery-controls">
+          <select id="galleryStudentSelect" onchange="updateGallery()">
+            <option value="">-- Seleccionar Alumno --</option>
+          </select>
+          <select id="gallerySubjectSelect" onchange="updateGallery()">
+            <option value="Todas">Todas las asignaturas</option>
+            <option value="Matematicas">Matemáticas</option>
+            <option value="Lengua">Lengua</option>
+            <option value="Ciencias">Ciencias</option>
+            <option value="Ingles">Inglés</option>
+            <option value="Artistica">Artística</option>
+          </select>
+          <button onclick="exitGalleryView()" class="secondary-btn">← Volver (ESC)</button>
+        </div>
+      </div>
+
+      <div id="galleryGrid" class="gallery-grid">
+        <!-- Las fotos se cargarán aquí -->
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal para ver foto en grande (Lightbox) -->
+  <div id="lightbox" class="lightbox" onclick="closeLightbox()">
+    <span class="close-lightbox" onclick="closeLightbox()">&times;</span>
+    <button class="lightbox-nav prev" onclick="prevLightbox(event)">&#10094;</button>
+    <img id="lightboxImg" src="" alt="Ampliada" onclick="event.stopPropagation()">
+    <button class="lightbox-nav next" onclick="nextLightbox(event)">&#10095;</button>
+    <div id="lightboxCaption" class="lightbox-caption" onclick="event.stopPropagation()"></div>
+  </div>
+
+  <!-- Scripts -->
+  <script src="opencv.js" async onload="onOpenCvReady()" onerror="onOpenCvError()"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/dist/face-api.js"></script>
+  <script src="imageClassification.js"></script>
+  <script src="documentProcessor.js"></script>
+  <script src="faceRecognition.js"></script>
+  <script src="app.js"></script>
+</body>
+
+</html>

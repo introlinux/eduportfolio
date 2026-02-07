@@ -1,0 +1,23 @@
+# Dependencias
+node_modules/
+
+# Construcción y ejecutables
+dist/
+release-builds/
+*.exe
+*.dll
+*.msi
+
+# Datos y Fotos
+data/
+portfolios/
+*.db
+*.db-journal
+
+# Logs y temporales
+*.log
+.DS_Store
+Thumbs.db
+
+# Configuración local
+.env
