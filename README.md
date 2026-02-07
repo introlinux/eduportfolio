@@ -28,7 +28,7 @@ EduPortfolio es una solución innovadora que digitaliza automáticamente los tra
 
 ## 🎯 Descripción General
 
-EduPortfolio es un **kiosko digital autónomo** diseñado para entornos de Educación Infantil y Primaria. Permite que los alumnos digitalicen sus trabajos de forma autónoma mientras el sistema se encarga de organizarlos automáticamente.
+EduPortfolio (versión de escritorio) es un **kiosko digital autónomo** diseñado para entornos de Educación Infantil y Primaria. Permite que los alumnos digitalicen sus trabajos de forma autónoma mientras el sistema se encarga de organizarlos automáticamente.
 
 ### 🔐 Privacidad por Diseño
 El proyecto adopta un paradigma **Local-First**, garantizando que:
