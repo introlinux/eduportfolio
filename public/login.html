@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EduPortfolio - Inicio de Sesión</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+
+    .login-container {
+      background: white;
+      border-radius: 20px;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+      padding: 40px;
+      max-width: 400px;
+      width: 100%;
+      animation: slideIn 0.5s ease-out;
+    }
+
+    @keyframes slideIn {
+      from {
+        opacity: 0;
+        transform: translateY(-30px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    .logo {
+      text-align: center;
+      margin-bottom: 30px;
+    }
+
+    .logo h1 {
+      color: #667eea;
+      font-size: 32px;
+      margin-bottom: 5px;
+    }
+
+    .logo p {
+      color: #666;
+      font-size: 14px;
+    }
+
+    .lock-icon {
+      font-size: 60px;
+      margin-bottom: 20px;
+      transition: transform 0.3s ease;
+    }
+
+    .lock-icon.unlocked {
+      transform: rotate(10deg);
+    }
+
+    .form-group {
+      margin-bottom: 20px;
+    }
+
+    label {
+      display: block;
+      margin-bottom: 8px;
+      color: #333;
+      font-weight: 500;
+    }
+
+    input[type="password"] {
+      width: 100%;
+      padding: 12px 15px;
+      border: 2px solid #e0e0e0;
+      border-radius: 10px;
+      font-size: 16px;
+      transition: border-color 0.3s ease;
+    }
+
+    input[type="password"]:focus {
+      outline: none;
+      border-color: #667eea;
+    }
+
+    .btn {
+      width: 100%;
+      padding: 14px;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      border: none;
+      border-radius: 10px;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform 0.2s ease, box-shadow 0.2s ease;
+    }
+
+    .btn:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+    }
+
+    .btn:active {
+      transform: translateY(0);
+    }
+
+    .btn:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    .message {
+      margin-top: 15px;
+      padding: 12px;
+      border-radius: 8px;
+      text-align: center;
+      font-size: 14px;
+      display: none;
+    }
+
+    .message.error {
+      background: #fee;
+      color: #c33;
+      border: 1px solid #fcc;
+    }
+
+    .message.success {
+      background: #efe;
+      color: #3c3;
+      border: 1px solid #cfc;
+    }
+
+    .message.info {
+      background: #eef;
+      color: #33c;
+      border: 1px solid #ccf;
+    }
+
+    .vault-status {
+      margin-top: 20px;
+      padding: 15px;
+      background: #f5f5f5;
+      border-radius: 10px;
+      font-size: 13px;
+      color: #666;
+    }
+
+    .vault-status strong {
+      color: #333;
+    }
+
+    .loading {
+      display: inline-block;
+      width: 16px;
+      height: 16px;
+      border: 3px solid #f3f3f3;
+      border-top: 3px solid #667eea;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+      margin-left: 10px;
+    }
+
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+
+    .hint {
+      margin-top: 15px;
+      text-align: center;
+      font-size: 12px;
+      color: #999;
+    }
+  </style>
+</head>
+<body>
+  <div class="login-container">
+    <div class="logo">
+      <div class="lock-icon" id="lockIcon">🔒</div>
+      <h1>EduPortfolio</h1>
+      <p>Sistema de Portfolios Educativos</p>
+    </div>
+
+    <form id="loginForm">
+      <div class="form-group">
+        <label for="password">Contraseña del Maestro</label>
+        <input 
+          type="password" 
+          id="password" 
+          name="password" 
+          placeholder="Ingresa tu contraseña"
+          autocomplete="current-password"
+          required
+        >
+      </div>
+
+      <button type="submit" class="btn" id="loginBtn">
+        Desbloquear Baúl
+      </button>
+    </form>
+
+    <div class="message" id="message"></div>
+
+    <div class="vault-status" id="vaultStatus" style="display: none;">
+      <strong>Estado del Baúl:</strong><br>
+      <span id="statusText"></span>
+    </div>
+
+    <div class="hint" id="hint">
+      Contraseña predeterminada: <strong>eduportfolio</strong>
+    </div>
+  </div>
+
+  <script>
+    const API_BASE = 'http://localhost:3000/api';
+
+    // Elementos del DOM
+    const loginForm = document.getElementById('loginForm');
+    const passwordInput = document.getElementById('password');
+    const loginBtn = document.getElementById('loginBtn');
+    const messageEl = document.getElementById('message');
+    const vaultStatusEl = document.getElementById('vaultStatus');
+    const statusTextEl = document.getElementById('statusText');
+    const lockIcon = document.getElementById('lockIcon');
+    const hintEl = document.getElementById('hint');
+
+    // Mostrar mensaje
+    function showMessage(text, type = 'info') {
+      messageEl.textContent = text;
+      messageEl.className = `message ${type}`;
+      messageEl.style.display = 'block';
+    }
+
+    // Ocultar mensaje
+    function hideMessage() {
+      messageEl.style.display = 'none';
+    }
+
+    // Verificar estado inicial
+    async function checkStatus() {
+      try {
+        const response = await fetch(`${API_BASE}/auth/status`);
+        const data = await response.json();
+
+        if (data.isAuthenticated) {
+          // Ya está autenticado, redirigir a la app principal
+          window.location.href = '/';
+        }
+
+        if (data.vaultLocked) {
+          statusTextEl.textContent = '🔒 Bloqueado - Archivos encriptados';
+          vaultStatusEl.style.display = 'block';
+        }
+
+        // Si no tiene contraseña configurada, ocultar hint
+        if (!data.hasPassword) {
+          hintEl.style.display = 'none';
+        }
+      } catch (error) {
+        console.error('Error verificando estado:', error);
+      }
+    }
+
+    // Manejar login
+    loginForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      hideMessage();
+
+      const password = passwordInput.value;
+
+      if (!password) {
+        showMessage('Por favor ingresa una contraseña', 'error');
+        return;
+      }
+
+      // Deshabilitar botón
+      loginBtn.disabled = true;
+      loginBtn.innerHTML = 'Desbloqueando<span class="loading"></span>';
+
+      try {
+        const response = await fetch(`${API_BASE}/auth/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password })
+        });
+
+        const data = await response.json();
+
+        if (response.ok && data.success) {
+          // Éxito
+          lockIcon.textContent = '🔓';
+          lockIcon.classList.add('unlocked');
+          showMessage(
+            `✅ Autenticación exitosa! ${data.filesDecrypted} archivos desencriptados.`,
+            'success'
+          );
+
+          // Redirigir a la app principal después de 1.5 segundos
+          setTimeout(() => {
+            window.location.href = '/';
+          }, 1500);
+        } else {
+          // Error
+          showMessage(data.message || 'Contraseña incorrecta', 'error');
+          passwordInput.value = '';
+          passwordInput.focus();
+        }
+      } catch (error) {
+        showMessage('Error de conexión con el servidor', 'error');
+        console.error('Error:', error);
+      } finally {
+        loginBtn.disabled = false;
+        loginBtn.textContent = 'Desbloquear Baúl';
+      }
+    });
+
+    // Verificar estado al cargar
+    checkStatus();
+  </script>
+</body>
+</html>

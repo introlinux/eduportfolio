@@ -6,6 +6,10 @@ const fs = require('fs');
 const sqlite3 = require('sqlite3').verbose();
 const faceDbModule = null; // Se cargará después de asegurar las carpetas
 
+// === SISTEMA DE ENCRIPTACIÓN ===
+const { PasswordManager, DEFAULT_PASSWORD } = require('./password-manager');
+const { PortfolioVault } = require('./portfolio-vault');
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 const USER_DATA_PATH = process.env.USER_DATA_PATH;
@@ -20,6 +24,14 @@ const PUBLIC_DIR = path.join(__dirname, '../public'); // El código estático si
 // Asegurar que existan las carpetas de datos
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 if (!fs.existsSync(PORTFOLIOS_DIR)) fs.mkdirSync(PORTFOLIOS_DIR, { recursive: true });
+
+// Inicializar sistema de encriptación
+const passwordManager = new PasswordManager(DATA_DIR);
+const portfolioVault = new PortfolioVault(PORTFOLIOS_DIR, DATA_DIR);
+
+// Variable global para almacenar la contraseña actual (solo en memoria)
+let currentPassword = null;
+let isAuthenticated = false;
 
 // Ahora cargamos el módulo de base de datos de rostros una vez las carpetas existen
 const faceDb = require('./faceDatabase');
@@ -127,6 +139,153 @@ function getStudentFolderName(id, name) {
 }
 
 // ==================== API ENDPOINTS ====================
+
+// === ENDPOINTS DE AUTENTICACIÓN Y GESTIÓN DEL BAÚL ===
+
+// 0.1. Verificar estado de autenticación
+app.get('/api/auth/status', async (req, res) => {
+  try {
+    const hasPassword = await passwordManager.hasPassword();
+    const vaultLocked = await portfolioVault.isLocked();
+
+    res.json({
+      hasPassword,
+      isAuthenticated,
+      vaultLocked,
+      requiresSetup: !hasPassword
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 0.2. Configurar contraseña inicial (solo si no existe)
+app.post('/api/auth/setup', async (req, res) => {
+  const { password } = req.body;
+
+  if (!password) {
+    return res.status(400).json({ error: 'Contraseña requerida' });
+  }
+
+  try {
+    const result = await passwordManager.setPassword(password);
+
+    if (result.success) {
+      currentPassword = password;
+      isAuthenticated = true;
+      res.json({ success: true, message: 'Contraseña configurada correctamente' });
+    } else {
+      res.status(400).json({ success: false, message: result.message });
+    }
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 0.3. Verificar contraseña (login)
+app.post('/api/auth/login', async (req, res) => {
+  const { password } = req.body;
+
+  if (!password) {
+    return res.status(400).json({ error: 'Contraseña requerida' });
+  }
+
+  try {
+    const isValid = await passwordManager.verifyPassword(password);
+
+    if (isValid) {
+      currentPassword = password;
+      isAuthenticated = true;
+
+      // Desbloquear baúl automáticamente
+      const vaultResult = await portfolioVault.unlockVault(password);
+
+      res.json({
+        success: true,
+        message: 'Autenticación exitosa',
+        vaultUnlocked: vaultResult.success,
+        filesDecrypted: vaultResult.filesDecrypted
+      });
+    } else {
+      res.status(401).json({ success: false, message: 'Contraseña incorrecta' });
+    }
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 0.4. Cambiar contraseña
+app.post('/api/auth/change-password', async (req, res) => {
+  const { oldPassword, newPassword } = req.body;
+
+  if (!oldPassword || !newPassword) {
+    return res.status(400).json({ error: 'Contraseñas requeridas' });
+  }
+
+  try {
+    const result = await passwordManager.changePassword(oldPassword, newPassword);
+
+    if (result.success) {
+      currentPassword = newPassword;
+      res.json({ success: true, message: result.message });
+    } else {
+      res.status(400).json({ success: false, message: result.message });
+    }
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 0.5. Bloquear baúl manualmente
+app.post('/api/vault/lock', async (req, res) => {
+  if (!isAuthenticated || !currentPassword) {
+    return res.status(401).json({ error: 'No autenticado' });
+  }
+
+  try {
+    const result = await portfolioVault.lockVault(currentPassword);
+
+    if (result.success) {
+      res.json({
+        success: true,
+        message: 'Baúl bloqueado correctamente',
+        filesEncrypted: result.filesEncrypted,
+        errors: result.errors
+      });
+    } else {
+      res.status(400).json({ success: false, errors: result.errors });
+    }
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 0.6. Obtener estadísticas del baúl
+app.get('/api/vault/stats', async (req, res) => {
+  try {
+    const stats = await portfolioVault.getStats();
+    res.json(stats);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 0.7. Inicializar contraseña predeterminada (solo desarrollo)
+app.post('/api/auth/init-default', async (req, res) => {
+  try {
+    const result = await passwordManager.initializeDefaultPassword();
+    res.json({
+      success: true,
+      initialized: result.initialized,
+      isDefault: result.isDefault,
+      defaultPassword: result.initialized ? DEFAULT_PASSWORD : null
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// === ENDPOINTS EXISTENTES ===
 
 // 1. Obtener lista de alumnos
 app.get('/api/students', (req, res) => {
@@ -645,9 +804,97 @@ app.post('/api/system/temp-capture', (req, res) => {
   });
 });
 
+// === INICIALIZACIÓN Y ARRANQUE DEL SERVIDOR ===
+
+/**
+ * Inicializa el sistema de encriptación al arrancar el servidor
+ */
+async function initializeEncryptionSystem() {
+  console.log('\n🔐 Inicializando sistema de encriptación...');
+
+  // 1. Verificar si existe contraseña configurada
+  const hasPassword = await passwordManager.hasPassword();
+
+  if (!hasPassword) {
+    // Configurar contraseña predeterminada
+    console.log('⚠️  No hay contraseña configurada. Usando contraseña predeterminada.');
+    await passwordManager.initializeDefaultPassword();
+    console.log(`✅ Contraseña predeterminada configurada: "${DEFAULT_PASSWORD}"`);
+    console.log('⚠️  IMPORTANTE: Cambia la contraseña predeterminada en producción.');
+  } else {
+    console.log('✅ Contraseña del maestro ya configurada.');
+  }
+
+  // 2. Verificar estado del baúl
+  const vaultLocked = await portfolioVault.isLocked();
+  const stats = await portfolioVault.getStats();
+
+  if (vaultLocked) {
+    console.log('🔒 Baúl de portfolios BLOQUEADO.');
+    console.log(`   📊 Archivos encriptados: ${stats.encryptedFiles}`);
+    console.log('   ⚠️  Inicia sesión para desbloquear el baúl.');
+  } else {
+    console.log('🔓 Baúl de portfolios DESBLOQUEADO.');
+    console.log(`   📊 Total de archivos: ${stats.totalFiles}`);
+
+    if (stats.encryptedFiles > 0) {
+      console.log(`   ⚠️  Advertencia: ${stats.encryptedFiles} archivos aún encriptados.`);
+    }
+  }
+
+  console.log('');
+}
+
+let isShuttingDown = false;
+
+/**
+ * Maneja el cierre graceful del servidor
+ */
+async function gracefulShutdown(signal) {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+
+  console.log(`\n\n⚠️  Señal ${signal} recibida. Cerrando servidor...`);
+
+  // Si hay una sesión autenticada, bloquear el baúl
+  if (isAuthenticated && currentPassword) {
+    console.log('🔒 Bloqueando baúl de portfolios antes de cerrar...');
+
+    try {
+      const result = await portfolioVault.lockVault(currentPassword);
+      if (result.success) {
+        console.log(`✅ Baúl bloqueado. ${result.filesEncrypted} archivos encriptados.`);
+      } else {
+        console.error('❌ Error bloqueando baúl:', result.errors);
+      }
+    } catch (error) {
+      console.error('❌ Error en cierre graceful:', error.message);
+    }
+  }
+
+  // Cerrar base de datos
+  db.close((err) => {
+    if (err) {
+      console.error('Error cerrando base de datos:', err);
+    } else {
+      console.log('✅ Base de datos cerrada correctamente.');
+    }
+
+    console.log('👋 Servidor cerrado. ¡Hasta pronto!\n');
+    process.exit(0);
+  });
+}
+
+// Capturar señales de cierre
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+
 // Iniciar servidor
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`\n🚀 Servidor web EduPortfolio escuchando en http://localhost:${PORT}`);
   console.log(`📁 Carpeta de portfolios: ${PORTFOLIOS_DIR}`);
-  console.log(`📊 Base de datos: ${dbPath}\n`);
+  console.log(`📊 Base de datos: ${dbPath}`);
+
+  // Inicializar sistema de encriptación
+  await initializeEncryptionSystem();
 });
