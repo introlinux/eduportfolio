@@ -54,7 +54,7 @@ describe('Face Recognition Integration Test (Real DB)', () => {
 
         // 1. Save Profile
         const saveResult = await faceDatabase.saveFaceProfile(studentId, originalDescriptor);
-        expect(saveResult.message).toBe('Perfil facial guardado');
+        expect(saveResult.message).toBe('Perfil facial actualizado (1 imágenes)');
 
         // 2. Search with EXACT same descriptor
         const matchExact = await faceDatabase.findMatchingStudent(originalDescriptor);

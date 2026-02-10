@@ -78,6 +78,7 @@ function showView(viewName) {
   } else if (viewName === 'teacherView') {
     loadStudents();
     updatePendingCount();
+    loadSyncInfo();
   } else if (viewName === 'galleryView') {
     loadStudents(); // Carga alumnos en el select de la galería
     updateGallery();
@@ -863,6 +864,21 @@ async function updatePendingCount() {
   } catch (e) {
     console.error(e);
     return 0;
+  }
+}
+
+async function loadSyncInfo() {
+  try {
+    const response = await fetch(`${API_URL}/system/info`);
+    const data = await response.json();
+
+    const ipEl = document.getElementById('syncIp');
+    const portEl = document.getElementById('syncPort');
+
+    if (ipEl) ipEl.textContent = data.ip;
+    if (portEl) portEl.textContent = data.port;
+  } catch (e) {
+    console.error('Error cargando info de sincronización:', e);
   }
 }
 

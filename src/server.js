@@ -3,6 +3,7 @@ const path = require('path');
 const bodyParser = require('body-parser');
 const cors = require('cors');
 const fs = require('fs');
+const os = require('os');
 const sqlite3 = require('sqlite3').verbose();
 const faceDbModule = null; // Se cargará después de asegurar las carpetas
 
@@ -59,52 +60,67 @@ const db = new sqlite3.Database(dbPath, (err) => {
 // Inicializar base de datos
 function initDatabase() {
   db.serialize(() => {
-    // Tabla de alumnos
+    // === TABLA DE CURSOS (nueva) ===
+    db.run(`
+      CREATE TABLE IF NOT EXISTS courses (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        start_date TEXT NOT NULL,
+        end_date TEXT,
+        is_active INTEGER DEFAULT 1,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // === TABLA DE ASIGNATURAS (nueva) ===
+    db.run(`
+      CREATE TABLE IF NOT EXISTS subjects (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        color TEXT,
+        icon TEXT,
+        is_default INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // === TABLA DE ALUMNOS (actualizada) ===
     db.run(`
       CREATE TABLE IF NOT EXISTS students (
         id INTEGER PRIMARY KEY,
         name TEXT UNIQUE NOT NULL,
+        course_id INTEGER,
         enrollmentDate DATETIME DEFAULT CURRENT_TIMESTAMP,
-        isActive BOOLEAN DEFAULT 1
+        isActive BOOLEAN DEFAULT 1,
+        FOREIGN KEY(course_id) REFERENCES courses(id)
       )
     `);
 
-    // Tabla de registros de captura
-    // Nota: isClassified ya está en el CREATE TABLE para nuevas bases de datos
+    // === TABLA DE EVIDENCIAS (renombrada de captures) ===
     db.run(`
-      CREATE TABLE IF NOT EXISTS captures (
-        id INTEGER PRIMARY KEY,
-        studentId INTEGER NOT NULL,
-        subject TEXT NOT NULL,
-        imagePath TEXT NOT NULL,
-        captureDate DATETIME DEFAULT CURRENT_TIMESTAMP,
+      CREATE TABLE IF NOT EXISTS evidences (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        student_id INTEGER,
+        course_id INTEGER,
+        subject_id INTEGER NOT NULL,
+        type TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        thumbnail_path TEXT,
+        file_size INTEGER,
+        duration INTEGER,
+        capture_date TEXT NOT NULL,
+        is_reviewed INTEGER DEFAULT 1,
+        notes TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
         confidence REAL,
         method TEXT,
-        isClassified BOOLEAN DEFAULT 0,
-        FOREIGN KEY(studentId) REFERENCES students(id)
+        FOREIGN KEY(student_id) REFERENCES students(id) ON DELETE SET NULL,
+        FOREIGN KEY(course_id) REFERENCES courses(id),
+        FOREIGN KEY(subject_id) REFERENCES subjects(id)
       )
     `);
 
-    // Migración: Añadir columna isClassified SOLO si no existe (para BDs antiguas)
-    db.all("PRAGMA table_info(captures)", (err, columns) => {
-      if (err) {
-        console.error('Error checking captures table:', err);
-        return;
-      }
-
-      const hasIsClassified = columns.some(col => col.name === 'isClassified');
-      if (!hasIsClassified) {
-        db.run("ALTER TABLE captures ADD COLUMN isClassified BOOLEAN DEFAULT 0", (err) => {
-          if (err) {
-            console.error('Error adding isClassified column:', err);
-          } else {
-            console.log('✅ Columna isClassified añadida a tabla captures (migración)');
-          }
-        });
-      }
-    });
-
-    // Tabla de sesiones (Modo Sesión del Profesor)
+    // === TABLA DE SESIONES (sin cambios) ===
     db.run(`
       CREATE TABLE IF NOT EXISTS sessions (
         id INTEGER PRIMARY KEY,
@@ -115,7 +131,155 @@ function initDatabase() {
       )
     `);
 
-    console.log('📊 Tablas de base de datos inicializadas');
+    // === MIGRACIONES DE DATOS ===
+
+    // Migración 1: Poblar tabla de asignaturas con valores por defecto
+    db.get("SELECT COUNT(*) as count FROM subjects", (err, row) => {
+      if (!err && row.count === 0) {
+        const defaultSubjects = [
+          'Matemáticas',
+          'Lengua',
+          'Ciencias',
+          'Inglés',
+          'Artística'
+        ];
+
+        const stmt = db.prepare("INSERT INTO subjects (name, is_default) VALUES (?, 1)");
+        defaultSubjects.forEach(subject => stmt.run(subject));
+        stmt.finalize(() => {
+          console.log('✅ Asignaturas por defecto creadas');
+        });
+      }
+    });
+
+    // Migración 2: Crear curso por defecto si no existe
+    db.get("SELECT COUNT(*) as count FROM courses", (err, row) => {
+      if (!err && row.count === 0) {
+        const currentYear = new Date().getFullYear();
+        db.run(
+          "INSERT INTO courses (name, start_date, is_active) VALUES (?, ?, 1)",
+          [`Curso ${currentYear}-${currentYear + 1}`, new Date().toISOString()],
+          function (err) {
+            if (!err) {
+              console.log('✅ Curso por defecto creado');
+
+              // Asignar todos los estudiantes existentes al curso por defecto
+              db.run(
+                "UPDATE students SET course_id = ? WHERE course_id IS NULL",
+                [this.lastID],
+                (err) => {
+                  if (!err) {
+                    console.log('✅ Estudiantes asignados al curso por defecto');
+                  }
+                }
+              );
+            }
+          }
+        );
+      }
+    });
+
+    // Migración 3: Migrar datos de captures a evidences si captures existe y tiene datos
+    db.all("SELECT name FROM sqlite_master WHERE type='table' AND name='captures'", (err, tables) => {
+      if (!err && tables.length > 0) {
+        // La tabla captures existe, verificar si tiene datos
+        db.get("SELECT COUNT(*) as count FROM captures", (err, row) => {
+          if (!err && row && row.count > 0) {
+            console.log(`🔄 Migrando ${row.count} registros de captures a evidences...`);
+
+            // Migrar cada captura
+            db.all("SELECT * FROM captures", (err, captures) => {
+              if (err) {
+                console.error('Error leyendo captures:', err);
+                return;
+              }
+
+              captures.forEach(capture => {
+                // Buscar o crear la asignatura
+                db.get(
+                  "SELECT id FROM subjects WHERE name = ?",
+                  [capture.subject],
+                  (err, subject) => {
+                    let subjectId = subject ? subject.id : null;
+
+                    // Si no existe la asignatura, crearla
+                    if (!subjectId) {
+                      db.run(
+                        "INSERT INTO subjects (name, is_default) VALUES (?, 0)",
+                        [capture.subject],
+                        function (err) {
+                          if (!err) {
+                            subjectId = this.lastID;
+                            insertEvidence(capture, subjectId);
+                          }
+                        }
+                      );
+                    } else {
+                      insertEvidence(capture, subjectId);
+                    }
+                  }
+                );
+              });
+            });
+          }
+        });
+      }
+    });
+
+    function insertEvidence(capture, subjectId) {
+      db.run(
+        `INSERT INTO evidences (
+          student_id, subject_id, type, file_path, capture_date, 
+          confidence, method, is_reviewed, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          capture.studentId,
+          subjectId,
+          'IMG', // Asumir que todas las capturas antiguas son imágenes
+          capture.imagePath,
+          capture.captureDate || capture.timestamp,
+          capture.confidence,
+          capture.method,
+          capture.isClassified ? 1 : 0,
+          capture.captureDate || capture.timestamp
+        ],
+        (err) => {
+          if (err) {
+            console.error('Error migrando captura:', err);
+          }
+        }
+      );
+    }
+
+    // Migración 4: Añadir columna course_id a students si no existe
+    db.all("PRAGMA table_info(students)", (err, columns) => {
+      if (!err) {
+        const hasCourseId = columns.some(col => col.name === 'course_id');
+        if (!hasCourseId) {
+          db.run("ALTER TABLE students ADD COLUMN course_id INTEGER REFERENCES courses(id)", (err) => {
+            if (!err) {
+              console.log('✅ Columna course_id añadida a students');
+            }
+          });
+        }
+      }
+    });
+
+    // Migración 5: Añadir columna face_embeddings_192 a students si no existe (para soporte móvil)
+    db.all("PRAGMA table_info(students)", (err, columns) => {
+      if (!err) {
+        const hasEmbeddings = columns.some(col => col.name === 'face_embeddings_192');
+        if (!hasEmbeddings) {
+          db.run("ALTER TABLE students ADD COLUMN face_embeddings_192 BLOB", (err) => {
+            if (!err) {
+              console.log('✅ Columna face_embeddings_192 añadida a students');
+            }
+          });
+        }
+      }
+    });
+
+    console.log('📊 Tablas de base de datos inicializadas y migradas');
   });
 }
 
@@ -136,6 +300,48 @@ function getStudentFolderName(id, name) {
     .replace(/\s+/g, '_');        // Cambiar espacios por guiones bajos
 
   return `${safeName}_${id}`;
+}
+
+/**
+ * Genera el ID de asignatura (primeras 3 letras en mayúsculas)
+ * Compatible con el formato móvil
+ * @param {string} subjectName 
+ * @returns {string}
+ */
+function generateSubjectId(subjectName) {
+  const normalized = removeAccents(subjectName);
+  const id = normalized.length >= 3
+    ? normalized.substring(0, 3).toUpperCase()
+    : normalized.toUpperCase().padRight(3, 'X');
+  return id;
+}
+
+/**
+ * Normaliza el nombre del estudiante reemplazando espacios con guiones
+ * Compatible con el formato móvil
+ * @param {string} name 
+ * @returns {string}
+ */
+function normalizeStudentName(name) {
+  const normalized = removeAccents(name);
+  return normalized.replace(/\s+/g, '-');
+}
+
+/**
+ * Elimina acentos de un texto
+ * @param {string} text 
+ * @returns {string}
+ */
+function removeAccents(text) {
+  const withAccents = 'áéíóúÁÉÍÓÚñÑüÜ';
+  const withoutAccents = 'aeiouAEIOUnNuU';
+
+  let result = text;
+  for (let i = 0; i < withAccents.length; i++) {
+    result = result.replaceAll(withAccents[i], withoutAccents[i]);
+  }
+
+  return result;
 }
 
 // ==================== API ENDPOINTS ====================
@@ -355,73 +561,102 @@ app.post('/api/captures', (req, res) => {
     return;
   }
 
-  // Obtener nombre del alumno para la carpeta
-  db.get('SELECT name FROM students WHERE id = ?', [studentId], (err, student) => {
+  // Obtener datos del alumno y asignatura
+  db.get('SELECT name, course_id FROM students WHERE id = ?', [studentId], (err, student) => {
     if (err || !student) {
       res.status(500).json({ error: 'Alumno no encontrado' });
       return;
     }
 
-    const studentFolderName = getStudentFolderName(studentId, student.name);
-    // Usar la ruta dinámica PORTFOLIOS_DIR
-    const studentDir = path.join(PORTFOLIOS_DIR, studentFolderName);
-    const subjectDir = path.join(studentDir, subject);
-
-    // Migración automática: si existe la carpeta vieja student_ID, renombrarla
-    const oldStudentDir = path.join(PORTFOLIOS_DIR, `student_${studentId}`);
-    if (fs.existsSync(oldStudentDir) && !fs.existsSync(studentDir)) {
-      try {
-        fs.renameSync(oldStudentDir, studentDir);
-        console.log(`📂 Migrada carpeta: student_${studentId} -> ${studentFolderName}`);
-      } catch (e) {
-        console.error('Error migrando carpeta:', e);
-      }
-    }
-
-    if (!fs.existsSync(subjectDir)) {
-      fs.mkdirSync(subjectDir, { recursive: true });
-    }
-
-    // Generar nombre de archivo con timestamp
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
-    const filename = `${timestamp}.jpg`;
-    const filepath = path.join(subjectDir, filename);
-
-    // Guardar imagen (base64 → binary)
-    const imageBuffer = Buffer.from(imageData.replace(/^data:image\/\w+;base64,/, ''), 'base64');
-    fs.writeFile(filepath, imageBuffer, (err) => {
-      if (err) {
-        res.status(500).json({ error: 'Error guardando imagen' });
+    // Buscar el ID de la asignatura
+    db.get('SELECT id FROM subjects WHERE name = ?', [subject], (err, subjectRow) => {
+      if (err || !subjectRow) {
+        res.status(500).json({ error: 'Asignatura no encontrada' });
         return;
       }
 
-      // Guardar metadatos en BD
-      const relativePath = `${studentFolderName}/${subject}/${filename}`;
-      db.run(
-        'INSERT INTO captures (studentId, subject, imagePath, method, confidence, isClassified) VALUES (?, ?, ?, ?, ?, ?)',
-        [studentId, subject, relativePath, method || 'manual', confidence || 0, isClassified ? 1 : 0],
-        function (err) {
-          if (err) {
-            res.status(500).json({ error: err.message });
-            return;
-          }
-          res.json({
-            id: this.lastID,
-            filename,
-            subject,
-            message: 'Imagen guardada correctamente'
-          });
+      const subjectId = subjectRow.id;
+
+      // Crear directorio de evidencias si no existe
+      const evidencesDir = path.join(PORTFOLIOS_DIR, 'evidences');
+      if (!fs.existsSync(evidencesDir)) {
+        fs.mkdirSync(evidencesDir, { recursive: true });
+      }
+
+      // Generar nombre de archivo con formato móvil: [SUBJECT-ID]_[STUDENT-NAME]_[TIMESTAMP].jpg
+      const subjectPrefix = generateSubjectId(subject);
+      const studentName = normalizeStudentName(student.name);
+      const timestamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, '').replace('T', '_');
+      const filename = `${subjectPrefix}_${studentName}_${timestamp}.jpg`;
+      const filepath = path.join(evidencesDir, filename);
+
+      // Guardar imagen (base64 → binary)
+      const imageBuffer = Buffer.from(imageData.replace(/^data:image\/\w+;base64,/, ''), 'base64');
+      fs.writeFile(filepath, imageBuffer, (err) => {
+        if (err) {
+          res.status(500).json({ error: 'Error guardando imagen' });
+          return;
         }
-      );
+
+        // Guardar metadatos en tabla evidences
+        const relativePath = `evidences/${filename}`;
+        const captureDate = new Date().toISOString();
+
+        db.run(
+          `INSERT INTO evidences (
+            student_id, course_id, subject_id, type, file_path, 
+            capture_date, confidence, method, is_reviewed, created_at, file_size
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            studentId,
+            student.course_id,
+            subjectId,
+            'IMG',
+            relativePath,
+            captureDate,
+            confidence || 0,
+            method || 'manual',
+            isClassified ? 1 : 0,
+            captureDate,
+            imageBuffer.length
+          ],
+          function (err) {
+            if (err) {
+              res.status(500).json({ error: err.message });
+              return;
+            }
+            res.json({
+              id: this.lastID,
+              filename,
+              subject,
+              message: 'Imagen guardada correctamente'
+            });
+          }
+        );
+      });
     });
   });
 });
 
-// 4. Obtener capturas de un alumno
+// 4. Obtener evidencias de un alumno (compatible con frontend antiguo)
 app.get('/api/captures/:studentId', (req, res) => {
   const { studentId } = req.params;
+
+  // Query con JOIN para obtener el nombre de la asignatura
   db.all(
-    'SELECT * FROM captures WHERE studentId = ? ORDER BY captureDate DESC',
+    `SELECT 
+      e.id,
+      e.student_id as studentId,
+      s.name as subject,
+      e.file_path as imagePath,
+      e.capture_date as timestamp,
+      e.confidence,
+      e.method,
+      e.is_reviewed as isClassified
+    FROM evidences e
+    LEFT JOIN subjects s ON e.subject_id = s.id
+    WHERE e.student_id = ?
+    ORDER BY e.capture_date DESC`,
     [studentId],
     (err, rows) => {
       if (err) {
@@ -884,6 +1119,227 @@ async function gracefulShutdown(signal) {
     process.exit(0);
   });
 }
+
+// ==================== API DE SINCRONIZACIÓN (MÓVIL <-> ESCRITORIO) ====================
+
+// 1. Obtener metadatos completos (PULL desde móvil)
+app.get('/api/sync/metadata', (req, res) => {
+  const metadata = {
+    students: [],
+    courses: [],
+    subjects: [],
+    evidences: []
+  };
+
+  db.serialize(() => {
+    db.all('SELECT * FROM courses', (err, rows) => {
+      if (!err) metadata.courses = rows;
+    });
+
+    db.all('SELECT * FROM subjects', (err, rows) => {
+      if (!err) metadata.subjects = rows;
+    });
+
+    db.all('SELECT * FROM students', (err, rows) => {
+      if (!err) metadata.students = rows;
+    });
+
+    db.all('SELECT * FROM evidences', (err, rows) => {
+      if (!err) metadata.evidences = rows;
+      // Enviar respuesta cuando termine la última consulta
+      res.json(metadata);
+    });
+  });
+});
+
+// 2. Recibir datos nuevos (PUSH desde móvil)
+app.post('/api/sync/push', (req, res) => {
+  const { students, evidences } = req.body;
+  const results = { students: 0, evidences: 0, errors: [] };
+
+  db.serialize(() => {
+    // Procesar estudiantes
+    if (students && students.length > 0) {
+      // Usamos REPLACE para actualizar si ya existe (especialmente para añadir embeddings)
+      const stmt = db.prepare(`
+        INSERT OR REPLACE INTO students (id, name, course_id, enrollmentDate, isActive, face_embeddings_192)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `);
+
+      students.forEach(s => {
+        // Convertir array de embeddings a Buffer si viene como array
+        let embeddingsBuffer = null;
+        if (s.face_embeddings_192) {
+          if (Array.isArray(s.face_embeddings_192)) {
+            embeddingsBuffer = Buffer.from(s.face_embeddings_192);
+          } else if (s.face_embeddings_192.type === 'Buffer') {
+            embeddingsBuffer = Buffer.from(s.face_embeddings_192.data);
+          } else {
+            embeddingsBuffer = s.face_embeddings_192;
+          }
+        }
+
+        stmt.run([
+          s.id,
+          s.name,
+          s.courseId,
+          s.enrollmentDate,
+          s.isActive ? 1 : 0,
+          embeddingsBuffer
+        ], function (err) {
+          if (err) results.errors.push(`Error sync student ${s.id}: ${err.message}`);
+          else results.students++;
+        });
+      });
+      stmt.finalize();
+    }
+
+    // Procesar evidencias (metadatos)
+    if (evidences && evidences.length > 0) {
+      const stmt = db.prepare(`
+        INSERT OR IGNORE INTO evidences (
+          id, student_id, course_id, subject_id, type, file_path, 
+          capture_date, confidence, method, is_reviewed, file_size
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+
+      evidences.forEach(e => {
+        stmt.run([
+          e.id, e.studentId, e.courseId, e.subjectId, e.type, e.filePath,
+          e.captureDate, e.confidence, e.method, e.isReviewed ? 1 : 0, e.fileSize
+        ], function (err) {
+          if (err) results.errors.push(`Error sync evidence ${e.id}: ${err.message}`);
+          else if (this.changes > 0) results.evidences++;
+        });
+      });
+      stmt.finalize(() => {
+        res.json({ success: true, results });
+      });
+    } else {
+      res.json({ success: true, results });
+    }
+  });
+});
+
+// 3. Subir archivo de evidencia (desde móvil)
+app.post('/api/sync/files', (req, res) => {
+  // Nota: En una implementación real usaríamos middleware como 'multer' para multipart/form-data
+  // Aquí asumimos envío raw body o base64 para simplificar, similar a /api/captures
+
+  const { filename, fileData } = req.body;
+  if (!filename || !fileData) {
+    return res.status(400).json({ error: 'Filename and fileData required' });
+  }
+
+  // Verificar si el baúl está bloqueado
+  portfolioVault.isLocked().then(locked => {
+    // Si está bloqueado, NO permitimos guardar archivos porque no podemos encriptarlos correctamente
+    // sin la contraseña del usuario (que no queremos transmitir por la red)
+    /*
+    if (locked) {
+      return res.status(403).json({ error: 'Vault is locked. Unlock desktop app to sync files.' });
+    }
+    */
+    // REVISIÓN: En realidad, si el baúl está bloqueado, podríamos guardar los archivos ENCRIPTADOS
+    // si tuviéramos la clave pública o similar, pero aquí la encriptación es simétrica.
+    // Opción segura: Solo permitir sync si el baúl está desbloqueado.
+
+    if (locked) {
+      return res.status(503).json({
+        error: 'El baúl está bloqueado. Desbloquea la aplicación de escritorio para sincronizar archivos.'
+      });
+    }
+
+    const evidencesDir = path.join(PORTFOLIOS_DIR, 'evidences');
+    if (!fs.existsSync(evidencesDir)) {
+      fs.mkdirSync(evidencesDir, { recursive: true });
+    }
+
+    const filepath = path.join(evidencesDir, filename);
+    const buffer = Buffer.from(fileData, 'base64');
+
+    fs.writeFile(filepath, buffer, (err) => {
+      if (err) {
+        res.status(500).json({ error: 'Error saving file' });
+      } else {
+        res.json({ success: true, filename });
+      }
+    });
+  });
+});
+
+// 4. Descargar archivo de evidencia (hacia móvil)
+app.get('/api/sync/files/:filename', (req, res) => {
+  const { filename } = req.params;
+
+  // Buscar en carpetas planas (nuevo sistema)
+  let filepath = path.join(PORTFOLIOS_DIR, 'evidences', filename);
+
+  if (!fs.existsSync(filepath)) {
+    // Intentar buscar en estructura antigua (fallback)
+    // Esto es complicado porque requeriría consultar la BD para saber la ruta antigua...
+    // Por simplicidad, asumimos que todo se mueve a evidences/ o la BD tiene la ruta correcta relativa
+
+    // Consultar BD para ver si es una ruta relativa antigua
+    db.get('SELECT file_path FROM evidences WHERE file_path LIKE ?', [`%${filename}`], (err, row) => {
+      if (err || !row) {
+        return res.status(404).json({ error: 'File not found' });
+      }
+
+      // Construir ruta completa basada en lo que hay en BD
+      filepath = path.join(PORTFOLIOS_DIR, row.file_path);
+
+      serveFile(res, filepath);
+    });
+  } else {
+    serveFile(res, filepath);
+  }
+});
+
+/**
+ * Obtiene la dirección IP local del equipo en la red.
+ * @returns {string}
+ */
+function getLocalIpAddress() {
+  const interfaces = os.networkInterfaces();
+  for (const name of Object.keys(interfaces)) {
+    for (const iface of interfaces[name]) {
+      // Filtrar IPv4 y que no sea loopback (127.0.0.1)
+      if (iface.family === 'IPv4' && !iface.internal) {
+        return iface.address;
+      }
+    }
+  }
+  return 'localhost';
+}
+
+// 5. Obtener información del sistema (IP y puerto para sincronización)
+app.get('/api/system/info', (req, res) => {
+  res.json({
+    ip: getLocalIpAddress(),
+    port: PORT,
+    status: 'online'
+  });
+});
+
+
+function serveFile(res, filepath) {
+  // Verificar si el archivo existe
+  if (!fs.existsSync(filepath)) {
+    return res.status(404).json({ error: 'File on disk not found' });
+  }
+
+  // Verificar si está encriptado
+  // (Nota: fs.existsSync(filepath) daría false si solo existe .enc, así que hay que comprobar ambos)
+
+  // Si pedimos archivo.jpg y existe archivo.jpg.enc
+  if (!fs.existsSync(filepath) && fs.existsSync(filepath + '.enc')) {
+    return res.status(503).json({ error: 'File is encrypted. Unlock vault first.' });
+  }
+
+  res.sendFile(filepath);
+}
+
 
 // Capturar señales de cierre
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));

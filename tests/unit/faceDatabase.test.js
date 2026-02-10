@@ -50,19 +50,23 @@ describe('FaceDatabase Module', () => {
     describe('saveFaceProfile', () => {
         test('should save profile successfully', async () => {
             // Setup mock behavior for success
-            // db.run(sql, params, callback)
+            // first calls db.get
+            mockGet.mockImplementation((query, params, callback) => {
+                callback(null, null); // No existing profile
+            });
+            // then calls db.run(sql, params, callback)
             mockRun.mockImplementation((query, params, callback) => {
-                callback(null); // Success
+                callback.call({ lastID: 1 }, null); // Success
             });
 
             const result = await faceDatabase.saveFaceProfile(1, [0.1]);
 
-            expect(result.message).toBe('Perfil facial guardado');
+            expect(result.message).toBe('Perfil facial actualizado (1 imágenes)');
             expect(mockRun).toHaveBeenCalled();
         });
 
         test('should reject on DB error', async () => {
-            mockRun.mockImplementation((query, params, callback) => {
+            mockGet.mockImplementation((query, params, callback) => {
                 callback(new Error('DB Error'));
             });
 
@@ -72,10 +76,10 @@ describe('FaceDatabase Module', () => {
 
     describe('findMatchingStudent', () => {
         test('should find matching student', async () => {
-            const stored = [1.0, 1.0];
+            const stored = [[1.0, 1.0]];
             mockAll.mockImplementation((query, callback) => {
                 callback(null, [
-                    { studentId: 1, faceDescriptor: JSON.stringify(stored) }
+                    { studentId: 1, faceDescriptors: JSON.stringify(stored) }
                 ]);
             });
 
