@@ -557,11 +557,31 @@ async function processVideoFrame() {
 function onManualStudentSelect() {
   const select = document.getElementById('manualStudentSelect');
   const studentId = select.value;
+
+  // Caso especial: Volver a modo automático
+  if (studentId === 'AUTO_MODE') {
+    setAutomaticMode();
+    select.value = ''; // Resetear selector
+    return;
+  }
+
   if (!studentId) return;
 
-  const studentName = select.options[select.selectedIndex].text;
+  // *** DETENER TODO LO AUTOMÁTICO INMEDIATAMENTE ***
+  clearTimeout(greetingTimer);
+  clearTimeout(countdownTimer);
 
-  console.log(`🖱️ Selección manual: ${studentName} (ID: ${studentId})`);
+  // Ocultar overlays activos
+  const countdownEl = document.getElementById('countdownOverlay');
+  if (countdownEl) countdownEl.classList.remove('show');
+
+  const flashEl = document.getElementById('flashOverlay');
+  if (flashEl) flashEl.classList.remove('flash');
+
+  const imgOverlay = document.getElementById('capturePreviewOverlay');
+  if (imgOverlay) imgOverlay.style.display = 'none';
+
+  const studentName = select.options[select.selectedIndex].text;
 
   console.log(`🖱️ Selección manual: ${studentName} (ID: ${studentId})`);
 
@@ -572,6 +592,23 @@ function onManualStudentSelect() {
   // Feedback visual
   showMessage(`Modo Manual: ${studentName}<br>Pulsa ESPACIO para capturar`);
   showNotification('Modo Manual activado. Pulsa ESPACIO para hacer la foto.', 'info');
+}
+
+function setAutomaticMode() {
+  console.log('🔄 Reactivando Modo Automático');
+
+  // Limpiar estado manual
+  manualSelectedStudent = null;
+  photoBoothState = 'WAITING_FACE';
+
+  // Limpiar timers por si acaso
+  clearTimeout(greetingTimer);
+  clearTimeout(countdownTimer);
+
+  // Ocultar mensajes de manual
+  hideMessage();
+
+  showNotification('🔄 Modo Automático Reactivado', 'success');
 }
 
 // ==================== SECUENCIA DE CAPTURA ====================
@@ -760,23 +797,24 @@ async function savePhoto(photoData, studentName, studentId) {
       })
     });
 
-    // Resetear selección manual después de guardar
-    if (manualSelectedStudent) {
-      const manualSelect = document.getElementById('manualStudentSelect');
-      if (manualSelect) manualSelect.value = '';
-      manualSelectedStudent = null;
-    }
-
     const result = await response.json();
 
     if (response.ok) {
       console.log(`💾 Foto guardada: ${result.id}`);
-      showMessage(`✅ ¡Guardado!<br>${currentSubject} - ${finalStudentName}`);
+      showMessage(`✅ ¡Guardado, ${finalStudentName}!`);
 
       // Volver a esperar después de 3 segundos
       setTimeout(() => {
         hideMessage();
-        photoBoothState = 'WAITING_FACE';
+
+        // Si no estamos en modo manual, volvemos a esperar caras
+        if (!manualSelectedStudent) {
+          photoBoothState = 'WAITING_FACE';
+        } else {
+          // Si estamos en modo manual, volvemos a estado LISTO y mostramos mensaje
+          photoBoothState = 'MANUAL_READY';
+          showMessage(`Modo Manual: ${manualSelectedStudent.name}<br>Pulsa ESPACIO para capturar`);
+        }
       }, 3000);
     } else {
       throw new Error(result.error || 'Error al guardar');
@@ -930,6 +968,7 @@ async function loadStudents() {
     const manualSelect = document.getElementById('manualStudentSelect');
     if (manualSelect) {
       manualSelect.innerHTML = '<option value="">-- Selección Manual --</option>' +
+        '<option value="AUTO_MODE">✨ Modo Automático ✨</option>' +
         students.map(s => `<option value="${s.id}">${s.name}</option>`).join('');
     }
 
@@ -1823,6 +1862,68 @@ function openCourseModal() {
 
 function closeCourseModal() {
   document.getElementById('courseModal').style.display = 'none';
+}
+
+// === GESTIÓN DE CONTRASEÑA ===
+
+function openChangePasswordModal() {
+  document.getElementById('changePasswordModal').style.display = 'flex';
+  document.getElementById('changePasswordForm').reset();
+  document.getElementById('passwordError').style.display = 'none';
+}
+
+function closeChangePasswordModal() {
+  document.getElementById('changePasswordModal').style.display = 'none';
+  document.getElementById('changePasswordForm').reset();
+  document.getElementById('passwordError').style.display = 'none';
+}
+
+async function handleChangePassword(e) {
+  e.preventDefault();
+
+  const currentPassword = document.getElementById('currentPassword').value;
+  const newPassword = document.getElementById('newPassword').value;
+  const confirmPassword = document.getElementById('confirmPassword').value;
+  const errorDiv = document.getElementById('passwordError');
+
+  // Validar que las contraseñas coincidan
+  if (newPassword !== confirmPassword) {
+    errorDiv.textContent = '❌ Las contraseñas no coinciden';
+    errorDiv.style.display = 'block';
+    return;
+  }
+
+  // Validar longitud mínima
+  if (newPassword.length < 4) {
+    errorDiv.textContent = '❌ La contraseña debe tener al menos 4 caracteres';
+    errorDiv.style.display = 'block';
+    return;
+  }
+
+  try {
+    const response = await fetch(`${API_URL}/auth/change-password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        oldPassword: currentPassword,
+        newPassword: newPassword
+      })
+    });
+
+    const data = await response.json();
+
+    if (response.ok && data.success) {
+      showNotification('✅ Contraseña cambiada correctamente', 'success');
+      closeChangePasswordModal();
+    } else {
+      errorDiv.textContent = `❌ ${data.message || 'Error cambiando la contraseña'}`;
+      errorDiv.style.display = 'block';
+    }
+  } catch (error) {
+    console.error('Error cambiando contraseña:', error);
+    errorDiv.textContent = '❌ Error de conexión al servidor';
+    errorDiv.style.display = 'block';
+  }
 }
 
 async function handleCreateCourse(e) {

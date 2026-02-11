@@ -201,6 +201,15 @@
             </div>
             <small>Asegúrate de estar en la misma red Wi-Fi.</small>
           </div>
+
+          <div class="maintenance-card" style="border-color: #FF5722; background: rgba(255, 87, 34, 0.1);">
+            <h3>🔐 Seguridad</h3>
+            <p>Cambia la contraseña de acceso a la aplicación:</p>
+            <div style="font-size: 0.9em; color: #666; margin-bottom: 10px;">
+              ℹ️ Las imágenes se encriptan automáticamente con tu contraseña.
+            </div>
+            <button onclick="openChangePasswordModal()">🔑 Cambiar Contraseña</button>
+          </div>
         </div>
       </div>
 
@@ -225,6 +234,36 @@
             <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px;">
               <button type="button" class="secondary-btn" onclick="closeCourseModal()">Cancelar</button>
               <button type="submit">Crear Curso</button>
+            </div>
+          </form>
+        </div>
+      </div>
+
+      <!-- Modal Cambiar Contraseña -->
+      <div id="changePasswordModal" class="modal" style="display: none;">
+        <div class="modal-content">
+          <span class="close-modal" onclick="closeChangePasswordModal()">&times;</span>
+          <h2>🔐 Cambiar Contraseña</h2>
+          <form id="changePasswordForm" onsubmit="handleChangePassword(event)">
+            <div class="form-group" style="flex-direction: column; align-items: stretch;">
+              <label for="currentPassword">Contraseña Actual:</label>
+              <input type="password" id="currentPassword" placeholder="Contraseña actual" required autocomplete="current-password">
+            </div>
+            <div class="form-group" style="flex-direction: column; align-items: stretch;">
+              <label for="newPassword">Nueva Contraseña:</label>
+              <input type="password" id="newPassword" placeholder="Nueva contraseña" required minlength="4" autocomplete="new-password">
+            </div>
+            <div class="form-group" style="flex-direction: column; align-items: stretch;">
+              <label for="confirmPassword">Confirmar Nueva Contraseña:</label>
+              <input type="password" id="confirmPassword" placeholder="Confirma la nueva contraseña" required minlength="4" autocomplete="new-password">
+            </div>
+            <div id="passwordError" style="color: #f44336; font-size: 0.9em; margin-top: 10px; display: none;"></div>
+            <p style="font-size: 0.9em; color: #666; margin-top: 10px;">
+              ⚠️ Asegúrate de recordar tu nueva contraseña. No podrás acceder a tus datos sin ella.
+            </p>
+            <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px;">
+              <button type="button" class="secondary-btn" onclick="closeChangePasswordModal()">Cancelar</button>
+              <button type="submit">Cambiar Contraseña</button>
             </div>
           </form>
         </div>

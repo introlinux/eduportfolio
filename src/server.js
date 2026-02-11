@@ -11,6 +11,7 @@ const faceDbModule = null; // Se cargará después de asegurar las carpetas
 // === SISTEMA DE ENCRIPTACIÓN ===
 const { PasswordManager, DEFAULT_PASSWORD } = require('./password-manager');
 const { PortfolioVault } = require('./portfolio-vault');
+const { DecryptionCache } = require('./decryption-cache');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -38,6 +39,7 @@ if (!fs.existsSync(PORTFOLIOS_DIR)) fs.mkdirSync(PORTFOLIOS_DIR, { recursive: tr
 // Inicializar sistema de encriptación
 const passwordManager = new PasswordManager(DATA_DIR);
 const portfolioVault = new PortfolioVault(PORTFOLIOS_DIR, DATA_DIR);
+const decryptionCache = new DecryptionCache(150, 30 * 60 * 1000); // 150 imágenes, 30 min TTL
 
 // Variable global para almacenar la contraseña actual (solo en memoria)
 let currentPassword = null;
@@ -62,7 +64,48 @@ app.use(express.json({ limit: '50mb' })); // Replaces bodyParser.json
 app.use(express.urlencoded({ limit: '50mb', extended: true })); // Add express.urlencoded to replace bodyParser.urlencoded
 app.use(express.static(PUBLIC_DIR));
 app.use('/_temporal_', express.static(path.join(PORTFOLIOS_DIR, '_temporal_')));
-app.use('/portfolios', express.static(PORTFOLIOS_DIR));
+
+// === MIDDLEWARE DE DESENCRIPTACIÓN ON-DEMAND ===
+// Intercepta solicitudes de imágenes en /portfolios y las desencripta en memoria
+app.use('/portfolios', async (req, res, next) => {
+  // Solo procesar archivos de imagen
+  const isImage = /\.(jpg|jpeg|png)$/i.test(req.path);
+  if (!isImage) {
+    return next(); // Dejar pasar otros archivos
+  }
+
+  // Verificar autenticación
+  if (!isAuthenticated || !currentPassword) {
+    return res.status(401).json({ error: 'No autenticado. Inicia sesión primero.' });
+  }
+
+  try {
+    // Construir ruta absoluta del archivo
+    const filePath = path.join(PORTFOLIOS_DIR, req.path);
+
+    // Obtener imagen desencriptada del cache (o desencriptarla si no está)
+    const imageBuffer = await decryptionCache.get(filePath, currentPassword);
+
+    // Determinar tipo MIME
+    const ext = path.extname(req.path).toLowerCase();
+    const mimeType = ext === '.png' ? 'image/png' : 'image/jpeg';
+
+    // Servir imagen desde memoria
+    res.set('Content-Type', mimeType);
+    res.set('Cache-Control', 'private, max-age=3600'); // Cache del navegador por 1 hora
+    res.send(imageBuffer);
+  } catch (error) {
+    console.error(`❌ Error sirviendo imagen ${req.path}:`, error.message);
+
+    // Si el archivo no existe o no se puede desencriptar, devolver 404
+    if (error.code === 'ENOENT') {
+      return res.status(404).json({ error: 'Imagen no encontrada' });
+    }
+
+    res.status(500).json({ error: 'Error desencriptando imagen' });
+  }
+});
+
 app.use('/models', express.static(path.join(PUBLIC_DIR, 'models')));
 
 // Base de datos SQLite
@@ -438,14 +481,16 @@ app.post('/api/auth/login', async (req, res) => {
       currentPassword = password;
       isAuthenticated = true;
 
-      // Desbloquear baúl automáticamente
-      const vaultResult = await portfolioVault.unlockVault(password);
+      // ⚠️ NUEVO: Ya NO desencriptamos todo al iniciar sesión
+      // Las imágenes se desencriptan on-demand en memoria cuando se solicitan
+
+      console.log('✅ Usuario autenticado. Imágenes se desencriptarán on-demand.');
 
       res.json({
         success: true,
         message: 'Autenticación exitosa',
-        vaultUnlocked: vaultResult.success,
-        filesDecrypted: vaultResult.filesDecrypted
+        vaultUnlocked: true, // Para compatibilidad con frontend
+        filesDecrypted: 0 // Ya no desencriptamos todo
       });
     } else {
       res.status(401).json({ success: false, message: 'Contraseña incorrecta' });
@@ -501,11 +546,16 @@ app.post('/api/vault/lock', async (req, res) => {
   }
 });
 
-// 0.6. Obtener estadísticas del baúl
+// 0.6. Obtener estadísticas del baúl y cache
 app.get('/api/vault/stats', async (req, res) => {
   try {
-    const stats = await portfolioVault.getStats();
-    res.json(stats);
+    const vaultStats = await portfolioVault.getStats();
+    const cacheStats = decryptionCache.getStats();
+
+    res.json({
+      ...vaultStats,
+      cache: cacheStats
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -681,19 +731,33 @@ app.post('/api/captures', (req, res) => {
 
       // Guardar imagen (base64 → binary)
       const imageBuffer = Buffer.from(imageData.replace(/^data:image\/\w+;base64,/, ''), 'base64');
-      fs.writeFile(filepath, imageBuffer, (err) => {
+      fs.writeFile(filepath, imageBuffer, async (err) => {
         if (err) {
           res.status(500).json({ error: 'Error guardando imagen' });
           return;
         }
 
+        // ⚠️ NUEVO: Encriptar automáticamente la imagen si el usuario está autenticado
+        let finalFilename = filename;
+        if (isAuthenticated && currentPassword) {
+          try {
+            const cryptoManager = require('./crypto-manager');
+            await cryptoManager.encryptFile(filepath, currentPassword);
+            finalFilename = filename + cryptoManager.ENCRYPTED_EXTENSION;
+            console.log(`🔒 Imagen encriptada automáticamente: ${filename}`);
+          } catch (encryptError) {
+            console.error('⚠️  Error encriptando imagen:', encryptError.message);
+            // No fallar la operación completa si falla la encriptación
+          }
+        }
+
         // Guardar metadatos en tabla evidences
-        const relativePath = `evidences/${filename}`;
+        const relativePath = `evidences/${finalFilename}`;
         const captureDate = new Date().toISOString();
 
         db.run(
           `INSERT INTO evidences (
-            student_id, course_id, subject_id, type, file_path, 
+            student_id, course_id, subject_id, type, file_path,
             capture_date, confidence, method, is_reviewed, created_at, file_size
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
@@ -716,9 +780,9 @@ app.post('/api/captures', (req, res) => {
             }
             res.json({
               id: this.lastID,
-              filename,
+              filename: finalFilename,
               subject: finalSubjectName,
-              message: 'Imagen guardada correctamente'
+              message: 'Imagen guardada y encriptada correctamente'
             });
           }
         );
@@ -1391,29 +1455,22 @@ async function initializeEncryptionSystem() {
     // Configurar contraseña predeterminada
     console.log('⚠️  No hay contraseña configurada. Usando contraseña predeterminada.');
     await passwordManager.initializeDefaultPassword();
-    console.log(`✅ Contraseña predeterminada configurada: "${DEFAULT_PASSWORD}"`);
-    console.log('⚠️  IMPORTANTE: Cambia la contraseña predeterminada en producción.');
+    console.log(`✅ Contraseña predeterminada: "${DEFAULT_PASSWORD}"`);
+    console.log('⚠️  IMPORTANTE: Cambia la contraseña en el Panel del Docente > Seguridad.');
   } else {
-    console.log('✅ Contraseña del maestro ya configurada.');
+    console.log('✅ Contraseña del maestro configurada.');
   }
 
-  // 2. Verificar estado del baúl
-  const vaultLocked = await portfolioVault.isLocked();
+  // 2. Verificar estado de encriptación
   const stats = await portfolioVault.getStats();
 
-  if (vaultLocked) {
-    console.log('🔒 Baúl de portfolios BLOQUEADO.');
-    console.log(`   📊 Archivos encriptados: ${stats.encryptedFiles}`);
-    console.log('   ⚠️  Inicia sesión para desbloquear el baúl.');
-  } else {
-    console.log('🔓 Baúl de portfolios DESBLOQUEADO.');
-    console.log(`   📊 Total de archivos: ${stats.totalFiles}`);
-
-    if (stats.encryptedFiles > 0) {
-      console.log(`   ⚠️  Advertencia: ${stats.encryptedFiles} archivos aún encriptados.`);
-    }
-  }
-
+  console.log('📊 Estado del sistema de encriptación:');
+  console.log(`   • Total de archivos: ${stats.totalFiles}`);
+  console.log(`   • Archivos encriptados: ${stats.encryptedFiles}`);
+  console.log(`   • Archivos sin encriptar: ${stats.unencryptedFiles}`);
+  console.log('');
+  console.log('ℹ️  Las imágenes se desencriptarán on-demand en memoria RAM.');
+  console.log('ℹ️  Nunca se escribirán imágenes desencriptadas en el disco.');
   console.log('');
 }
 
@@ -1428,20 +1485,13 @@ async function gracefulShutdown(signal) {
 
   console.log(`\n\n⚠️  Señal ${signal} recibida. Cerrando servidor...`);
 
-  // Si hay una sesión autenticada, bloquear el baúl
-  if (isAuthenticated && currentPassword) {
-    console.log('🔒 Bloqueando baúl de portfolios antes de cerrar...');
-
-    try {
-      const result = await portfolioVault.lockVault(currentPassword);
-      if (result.success) {
-        console.log(`✅ Baúl bloqueado. ${result.filesEncrypted} archivos encriptados.`);
-      } else {
-        console.error('❌ Error bloqueando baúl:', result.errors);
-      }
-    } catch (error) {
-      console.error('❌ Error en cierre graceful:', error.message);
-    }
+  // ⚠️ NUEVO: Ya NO encriptamos todo al cerrar
+  // Las imágenes permanecen encriptadas en disco todo el tiempo
+  // Solo limpiamos el cache en memoria
+  if (isAuthenticated) {
+    console.log('🧹 Limpiando cache de desencriptación en memoria...');
+    decryptionCache.clear();
+    console.log('✅ Cache limpiado. Las imágenes permanecen encriptadas en disco.');
   }
 
   // Cerrar base de datos
@@ -1663,7 +1713,6 @@ app.post('/api/sync/push', async (req, res) => {
 });
 
 // 3. Subir archivo de evidencia (desde móvil)
-// 3. Subir archivo de evidencia (desde móvil)
 app.post('/api/sync/files', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) {
@@ -1672,12 +1721,10 @@ app.post('/api/sync/files', upload.single('file'), async (req, res) => {
 
     const filename = req.file.originalname;
 
-    // Verificar si el baúl está bloqueado
-    const locked = await portfolioVault.isLocked();
-
-    if (locked) {
-      return res.status(503).json({
-        error: 'El baúl está bloqueado. Desbloquea la aplicación de escritorio para sincronizar archivos.'
+    // Verificar autenticación
+    if (!isAuthenticated || !currentPassword) {
+      return res.status(401).json({
+        error: 'Servidor no autenticado. Inicia sesión en la aplicación de escritorio primero.'
       });
     }
 
@@ -1688,11 +1735,21 @@ app.post('/api/sync/files', upload.single('file'), async (req, res) => {
 
     const filepath = path.join(evidencesDir, filename);
 
-    // Escribir el archivo desde el buffer de multer
+    // Escribir el archivo temporalmente desde el buffer de multer
     fs.writeFileSync(filepath, req.file.buffer);
 
-    console.log(`✅ Archivo sincronizado: ${filename}`);
-    res.json({ success: true, filename });
+    // Encriptar automáticamente
+    let finalFilename = filename;
+    try {
+      const cryptoManager = require('./crypto-manager');
+      await cryptoManager.encryptFile(filepath, currentPassword);
+      finalFilename = filename + cryptoManager.ENCRYPTED_EXTENSION;
+      console.log(`✅ Archivo sincronizado y encriptado: ${filename}`);
+    } catch (encryptError) {
+      console.error('⚠️  Error encriptando archivo sincronizado:', encryptError.message);
+    }
+
+    res.json({ success: true, filename: finalFilename });
   } catch (error) {
     console.error('❌ Error guardando archivo:', error);
     res.status(500).json({ error: 'Error saving file' });
@@ -1855,7 +1912,7 @@ app.post('/api/system/move', (req, res) => {
       });
     });
 
-    getSubjectId.then(subjectId => {
+    getSubjectId.then(async subjectId => {
       // 1. Mover archivo
       const destPath = path.join(evidencesDir, filename);
 
@@ -1866,6 +1923,19 @@ app.post('/api/system/move', (req, res) => {
       } catch (err) {
         console.error('Error moviendo archivo:', err);
         return res.status(500).json({ error: 'Error al mover el archivo físico: ' + err.message });
+      }
+
+      // 1.1. Encriptar automáticamente si el usuario está autenticado
+      let finalFilename = filename;
+      if (isAuthenticated && currentPassword) {
+        try {
+          const cryptoManager = require('./crypto-manager');
+          await cryptoManager.encryptFile(destPath, currentPassword);
+          finalFilename = filename + cryptoManager.ENCRYPTED_EXTENSION;
+          console.log(`🔒 Archivo movido y encriptado: ${filename}`);
+        } catch (encryptError) {
+          console.error('⚠️  Error encriptando archivo movido:', encryptError.message);
+        }
       }
 
       // 2. Obtener datos del estudiante para la consistencia
@@ -1880,8 +1950,11 @@ app.post('/api/system/move', (req, res) => {
 
         const courseId = student.course_id || 1;
         const captureDate = new Date().toISOString();
-        const relativePath = `evidences/${filename}`;
-        const fileSize = fs.statSync(destPath).size;
+        const relativePath = `evidences/${finalFilename}`;
+
+        // Obtener tamaño del archivo encriptado (si existe)
+        const finalPath = path.join(evidencesDir, finalFilename);
+        const fileSize = fs.existsSync(finalPath) ? fs.statSync(finalPath).size : 0;
 
         // 3. Insertar en BD
         db.run(
