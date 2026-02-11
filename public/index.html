@@ -13,35 +13,21 @@
   <div id="subjectSelector" class="view active">
     <div class="selector-container">
       <h1>📚 Selecciona la Asignatura</h1>
-      <div class="subject-grid">
-        <button class="subject-btn" data-subject="Matematicas" onclick="selectSubject('Matematicas')">
-          <span class="subject-icon">🔢</span>
-          <span class="subject-name">Matemáticas</span>
-        </button>
-        <button class="subject-btn" data-subject="Lengua" onclick="selectSubject('Lengua')">
-          <span class="subject-icon">📖</span>
-          <span class="subject-name">Lengua</span>
-        </button>
-        <button class="subject-btn" data-subject="Ciencias" onclick="selectSubject('Ciencias')">
-          <span class="subject-icon">🔬</span>
-          <span class="subject-name">Ciencias</span>
-        </button>
-        <button class="subject-btn" data-subject="Ingles" onclick="selectSubject('Ingles')">
-          <span class="subject-icon">🇬🇧</span>
-          <span class="subject-name">Inglés</span>
-        </button>
-        <button class="subject-btn" data-subject="Artistica" onclick="selectSubject('Artistica')">
-          <span class="subject-icon">🎨</span>
-          <span class="subject-name">Artística</span>
-        </button>
+      <h3 id="mainActiveCourse"
+        style="text-align: center; color: #666; margin-top: -10px; margin-bottom: 20px; font-weight: normal;">Curso:
+        <span style="font-weight: bold; color: #2196F3;">...</span>
+      </h3>
+      <div id="subjectsGrid" class="subject-grid">
+        <!-- Las asignaturas se cargarán dinámicamente aquí -->
+        <p>Cargando asignaturas...</p>
       </div>
       <div class="selector-footer">
-        <small>Pulsa P para el Panel de Profesor y G para la Galería</small>
+        <small>Pulsa P para el Panel del Docente y G para la Galería</small>
       </div>
     </div>
   </div>
 
-  <!-- VISTA 2: CAPTURA (ALUMNADO) -->
+  <!-- VISTA 2: CAPTURA (ESTUDIANTADO) -->
   <div id="captureView" class="view">
     <div class="video-fullscreen">
       <video id="webcam" autoplay playsinline></video>
@@ -52,6 +38,16 @@
         <span id="currentSubject">Matemáticas</span>
       </div>
 
+      <!-- Selectores en Vista de Captura -->
+      <div class="manual-capture-controls">
+        <select id="cameraSelect" onchange="changeCamera()" title="Seleccionar Cámara">
+          <option value="">-- Buscando Cámaras --</option>
+        </select>
+        <select id="manualStudentSelect" onchange="onManualStudentSelect()" title="Selección Manual de Estudiante">
+          <option value="">-- Selección Manual --</option>
+        </select>
+      </div>
+
       <!-- Overlay de mensajes -->
       <div id="messageOverlay" class="message-overlay">
         <div id="messageText" class="message-text"></div>
@@ -60,6 +56,19 @@
       <!-- Cuenta atrás -->
       <div id="countdownOverlay" class="countdown-overlay">
         <div id="countdownNumber" class="countdown-number"></div>
+      </div>
+
+      <!-- Previsualización de captura -->
+      <div id="capturePreviewOverlay" class="preview-overlay" style="display: none;">
+        <div class="preview-content">
+          <img id="previewImage" src="" alt="Previsualización">
+          <div class="preview-actions">
+            <button id="cancelCaptureBtn" class="cancel-btn" onclick="discardPhoto()">❌ CANCELAR Y REPETIR</button>
+          </div>
+          <div class="preview-timer-bar">
+            <div id="previewTimerProgress" class="timer-progress"></div>
+          </div>
+        </div>
       </div>
 
       <!-- Efecto Flash -->
@@ -73,47 +82,59 @@
 
     <!-- Ayuda de teclado -->
     <div class="keyboard-help">
-      <span>(P) Panel Profesor</span>
+      <span>(P) Panel Docente</span>
       <span>(G) Galería</span>
       <span>(ESC) Volver</span>
     </div>
   </div>
 
-  <!-- VISTA 3: PROFESOR -->
+  <!-- VISTA 3: DOCENTE -->
   <div id="teacherView" class="view">
     <div class="teacher-container">
-      <h1>👨‍🏫 Panel del Profesor</h1>
+      <h1>👨‍🏫 Panel del Docente</h1>
 
       <div class="teacher-section">
-        <h2>Gestión de Alumnos</h2>
+        <h2>Gestión de Estudiantes</h2>
         <div class="form-group">
-          <input type="text" id="studentName" placeholder="Nombre del alumno">
-          <button onclick="addStudent()">Añadir Alumno</button>
+          <input type="text" id="studentName" placeholder="Nombre del estudiante">
+          <button onclick="addStudent()">Añadir Estudiante</button>
         </div>
         <div id="studentsList" class="students-list"></div>
       </div>
 
       <div class="teacher-section">
-        <h2>Entrenamiento Facial</h2>
-        <div class="form-group">
-          <select id="selectedStudentTraining">
-            <option value="">-- Selecciona un alumno --</option>
-          </select>
-          <button onclick="startTrainingMode()">Entrenar Rostro</button>
+        <h2>Gestión de Asignaturas</h2>
+        <div class="form-group" style="position: relative;">
+          <input type="text" id="newSubjectName" placeholder="Nombre (ej. Música)">
+          <div class="emoji-picker-container">
+            <button id="emojiPickerBtn" class="emoji-btn" onclick="toggleEmojiPicker(event)">📚</button>
+            <div id="emojiPicker" class="emoji-picker" style="display: none;">
+              <!-- Los emojis se cargarán por JS -->
+            </div>
+            <input type="hidden" id="newSubjectIcon" value="📚">
+          </div>
+          <input type="color" id="newSubjectColor" value="#2196F3" style="width: 50px; height: 38px; padding: 0;">
+          <button onclick="addSubject()">Añadir Asignatura</button>
         </div>
+        <div id="subjectsList" class="subjects-list">
+          <!-- Lista de asignaturas para editar/borrar -->
+        </div>
+      </div>
 
-        <div id="trainingSection" style="display: none;">
+      <div id="trainingModal" class="modal" style="display: none;">
+        <div class="modal-content">
+          <h2>📸 Entrenamiento Facial: <span id="trainingStudentName">---</span></h2>
           <p>Captura 3-5 imágenes desde diferentes ángulos</p>
 
-          <!-- Vista previa de cámara para entrenamiento -->
           <div class="training-video-container" style="margin: 1rem 0; text-align: center;">
-            <video id="trainingWebcam" autoplay playsinline
-              style="width: 100%; max-width: 480px; border-radius: 8px; border: 2px solid #333; background: #000;"></video>
+            <video id="trainingWebcam" autoplay playsinline class="training-video"></video>
           </div>
 
           <div id="trainingStatus">Imágenes capturadas: <span id="trainingCount">0</span>/5</div>
-          <button onclick="captureTrainingFace()">📸 Capturar Imagen</button>
-          <button onclick="stopTrainingMode()">Terminar</button>
+          <div class="form-group" style="justify-content: center; margin-top: 20px;">
+            <button onclick="captureTrainingFace()">📸 Capturar Imagen</button>
+            <button class="secondary-btn" onclick="stopTrainingMode()">Cancelar/Cerrar</button>
+          </div>
         </div>
       </div>
 
@@ -121,17 +142,33 @@
         <h2>Mantenimiento del Sistema</h2>
         <div class="maintenance-grid">
           <div class="maintenance-card">
-            <h3>Sincronización</h3>
-            <p>Escanea la carpeta de portfolios para añadir alumnos o fotos nuevas.</p>
-            <button onclick="syncPortfolios()">🔄 Sincronizar Ahora</button>
+            <h3>Importación de evidencias</h3>
+            <p>Escanea la carpeta <code>_temporal_</code> para identificar y mover fotos automáticamente.</p>
+            <p class="active-course-indicator">📚 Curso Actual: <span id="activeCourseName"
+                style="font-weight: bold; color: #333;">Cargando...</span></p>
+            <button onclick="syncPortfolios()">🔄 Importar</button>
           </div>
 
           <div class="maintenance-card">
-            <h3>Limpieza</h3>
+            <h3>Calidad de Captura</h3>
+            <p>Selecciona la resolución para las evidencias:</p>
+            <select id="qualitySelect" onchange="changeQuality()">
+              <option value="1080p">Full HD (1080p)</option>
+              <option value="1440p">2K QHD (1440p)</option>
+              <option value="2160p">4K UHD (2160p)</option>
+              <option value="max">Máxima de la Cámara</option>
+            </select>
+          </div>
+
+          <div class="maintenance-card">
+            <h3>Limpieza y Estado</h3>
+            <div id="systemStats" class="system-stats">
+              Cargando estadísticas...
+            </div>
             <p>Elige qué quieres borrar:</p>
             <div style="display: flex; gap: 10px;">
               <button class="danger-btn" onclick="resetSystem('photos')" style="flex: 1;">🗑️ Solo Fotos</button>
-              <button class="danger-btn" onclick="resetSystem('students')" style="flex: 1;">👥 Solo Alumnos</button>
+              <button class="danger-btn" onclick="resetSystem('students')" style="flex: 1;">👥 Solo Estudiantes</button>
             </div>
           </div>
 
@@ -142,6 +179,16 @@
                 id="pendingCount">0</span>)</button>
           </div>
 
+          <div class="maintenance-card" style="border-color: #2196F3; background: rgba(33, 150, 243, 0.1);">
+            <h3>Gestión de Cursos</h3>
+            <p>Administra los años académicos y archiva los antiguos.</p>
+            <div id="coursesList" class="courses-list">
+              <!-- Se llenará dinámicamente -->
+              Cargando cursos...
+            </div>
+            <button onclick="openCourseModal()" style="margin-top: 10px;">➕ Nuevo Curso</button>
+          </div>
+
           <div class="maintenance-card" style="border-color: #4CAF50; background: rgba(76, 175, 80, 0.1);">
             <h3>Sincronización Móvil</h3>
             <p>Usa estos datos en la app móvil:</p>
@@ -149,8 +196,37 @@
               IP: <span id="syncIp">Cargando...</span><br>
               Puerto: <span id="syncPort">3000</span>
             </div>
+            <div class="ip-list-hint" style="font-size: 0.8em; color: #666; margin-bottom: 5px;">
+              (Si ves varias IPs, prueba la primera)
+            </div>
             <small>Asegúrate de estar en la misma red Wi-Fi.</small>
           </div>
+        </div>
+      </div>
+
+      <!-- Modal Nuevo Curso -->
+      <div id="courseModal" class="modal" style="display: none;">
+        <div class="modal-content">
+          <span class="close-modal" onclick="closeCourseModal()">&times;</span>
+          <h2>📅 Nuevo Curso Académico</h2>
+          <form id="courseForm" onsubmit="handleCreateCourse(event)">
+            <div class="form-group">
+              <label for="courseName">Nombre del Curso:</label>
+              <input type="text" id="courseName" placeholder="Ej: Curso 2026-2027" required>
+            </div>
+            <div class="form-group">
+              <label for="courseStartDate">Fecha de Inicio:</label>
+              <input type="date" id="courseStartDate" required>
+            </div>
+            <p style="font-size: 0.9em; color: #666; margin-top: 10px;">
+              ℹ️ Al crear un nuevo curso, se convertirá en el activo por defecto.
+              Los cursos anteriores seguirán disponibles en el historial.
+            </p>
+            <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px;">
+              <button type="button" class="secondary-btn" onclick="closeCourseModal()">Cancelar</button>
+              <button type="submit">Crear Curso</button>
+            </div>
+          </form>
         </div>
       </div>
 
@@ -168,14 +244,10 @@
               <p id="wizardRecognitionStatus">Analizando rostro...</p>
               <div class="form-group">
                 <select id="wizardStudentSelect">
-                  <option value="">-- Seleccionar Alumno --</option>
+                  <option value="">-- Seleccionar Estudiante --</option>
                 </select>
                 <select id="wizardSubjectSelect">
-                  <option value="Matematicas">Matemáticas</option>
-                  <option value="Lengua">Lengua</option>
-                  <option value="Ciencias">Ciencias</option>
-                  <option value="Ingles">Inglés</option>
-                  <option value="Artistica">Artística</option>
+                  <!-- Se poblará dinámicamente -->
                 </select>
                 <button onclick="moveExternalPhoto()">📁 Mover a Portfolio</button>
               </div>
@@ -199,15 +271,12 @@
         <h1>🖼️ Galería de Trabajos</h1>
         <div class="gallery-controls">
           <select id="galleryStudentSelect" onchange="updateGallery()">
-            <option value="">-- Seleccionar Alumno --</option>
+            <option value="">Todos los estudiantes</option>
+            <!-- Se poblará dinámicamente -->
           </select>
           <select id="gallerySubjectSelect" onchange="updateGallery()">
             <option value="Todas">Todas las asignaturas</option>
-            <option value="Matematicas">Matemáticas</option>
-            <option value="Lengua">Lengua</option>
-            <option value="Ciencias">Ciencias</option>
-            <option value="Ingles">Inglés</option>
-            <option value="Artistica">Artística</option>
+            <!-- Se poblará dinámicamente -->
           </select>
           <button onclick="exitGalleryView()" class="secondary-btn">← Volver (ESC)</button>
         </div>
@@ -223,7 +292,11 @@
   <div id="lightbox" class="lightbox" onclick="closeLightbox()">
     <span class="close-lightbox" onclick="closeLightbox()">&times;</span>
     <button class="lightbox-nav prev" onclick="prevLightbox(event)">&#10094;</button>
-    <img id="lightboxImg" src="" alt="Ampliada" onclick="event.stopPropagation()">
+    <div style="position: relative; display: inline-block;">
+      <img id="lightboxImg" src="" alt="Ampliada" onclick="event.stopPropagation()">
+      <button class="delete-evidence-btn" onclick="deleteCurrentEvidence(event)"
+        title="Eliminar este trabajo">🗑️</button>
+    </div>
     <button class="lightbox-nav next" onclick="nextLightbox(event)">&#10095;</button>
     <div id="lightboxCaption" class="lightbox-caption" onclick="event.stopPropagation()"></div>
   </div>

@@ -5,6 +5,7 @@ const cors = require('cors');
 const fs = require('fs');
 const os = require('os');
 const sqlite3 = require('sqlite3').verbose();
+const multer = require('multer');
 const faceDbModule = null; // Se cargará después de asegurar las carpetas
 
 // === SISTEMA DE ENCRIPTACIÓN ===
@@ -14,6 +15,14 @@ const { PortfolioVault } = require('./portfolio-vault');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const USER_DATA_PATH = process.env.USER_DATA_PATH;
+
+// Configurar multer para subida de archivos
+const upload = multer({
+  storage: multer.memoryStorage(), // Guardar en memoria temporalmente
+  limits: {
+    fileSize: 50 * 1024 * 1024, // Límite de 50MB
+  },
+});
 
 // --- CONFIGURACIÓN DE RUTAS DE ARMEACENAMIENTO ---
 // Si hay USER_DATA_PATH (Prod), usamos esa ruta. Si no (Dev), usamos la local del proyecto.
@@ -36,6 +45,16 @@ let isAuthenticated = false;
 
 // Ahora cargamos el módulo de base de datos de rostros una vez las carpetas existen
 const faceDb = require('./faceDatabase');
+
+/**
+ * Normaliza un nombre para comparaciones flexibles (sin acentos y en minúsculas)
+ * @param {string} name 
+ * @returns {string}
+ */
+function normalizeNameForComparison(name) {
+  if (!name) return '';
+  return removeAccents(name).toLowerCase().trim();
+}
 
 // 1. Configuración básica y middlewares
 app.use(cors()); // Keep cors as it was not explicitly removed
@@ -137,17 +156,33 @@ function initDatabase() {
     db.get("SELECT COUNT(*) as count FROM subjects", (err, row) => {
       if (!err && row.count === 0) {
         const defaultSubjects = [
-          'Matemáticas',
-          'Lengua',
-          'Ciencias',
-          'Inglés',
-          'Artística'
+          { name: 'Matemáticas', icon: '🧮', color: '#2196F3' },
+          { name: 'Lengua', icon: '📚', color: '#4CAF50' },
+          { name: 'Ciencias', icon: '🧪', color: '#FF9800' },
+          { name: 'Inglés', icon: '🇬🇧', color: '#F44336' },
+          { name: 'Artística', icon: '🎨', color: '#9C27B0' }
         ];
 
-        const stmt = db.prepare("INSERT INTO subjects (name, is_default) VALUES (?, 1)");
-        defaultSubjects.forEach(subject => stmt.run(subject));
+        const stmt = db.prepare("INSERT INTO subjects (name, icon, color, is_default) VALUES (?, ?, ?, 1)");
+        defaultSubjects.forEach(s => stmt.run(s.name, s.icon, s.color));
         stmt.finalize(() => {
           console.log('✅ Asignaturas por defecto creadas');
+        });
+      } else {
+        // Parche para asignar iconos/colores a registros existentes que no los tengan
+        const patches = [
+          { name: 'Matemáticas', icon: '🧮', color: '#2196F3' },
+          { name: 'Lengua', icon: '📚', color: '#4CAF50' },
+          { name: 'Ciencias', icon: '🧪', color: '#FF9800' },
+          { name: 'Inglés', icon: '🇬🇧', color: '#F44336' },
+          { name: 'Artística', icon: '🎨', color: '#9C27B0' }
+        ];
+
+        patches.forEach(p => {
+          db.run(
+            "UPDATE subjects SET icon = ?, color = ? WHERE name = ? AND (icon IS NULL OR icon = '' OR color IS NULL OR color = '')",
+            [p.icon, p.color, p.name]
+          );
         });
       }
     });
@@ -493,9 +528,17 @@ app.post('/api/auth/init-default', async (req, res) => {
 
 // === ENDPOINTS EXISTENTES ===
 
-// 1. Obtener lista de alumnos
+// 1. Obtener lista de alumnos con estado de perfil facial
 app.get('/api/students', (req, res) => {
-  db.all('SELECT * FROM students WHERE isActive = 1', (err, rows) => {
+  const query = `
+    SELECT s.*, fp.descriptorCount 
+    FROM students s
+    LEFT JOIN face_profiles fp ON s.id = fp.studentId
+    WHERE s.isActive = 1
+    ORDER BY s.name ASC
+  `;
+
+  db.all(query, (err, rows) => {
     if (err) {
       res.status(500).json({ error: err.message });
       return;
@@ -504,7 +547,7 @@ app.get('/api/students', (req, res) => {
   });
 });
 
-// 2. Añadir nuevo alumno
+// 2. Añadir nuevo alumno (o reactivar si ya existía pero estaba inactivo)
 app.post('/api/students', (req, res) => {
   const { name } = req.body;
   if (!name) {
@@ -512,8 +555,22 @@ app.post('/api/students', (req, res) => {
     return;
   }
 
+  // Intentar insertar. Si falla por nombre único, intentar reactivar si estaba inactivo.
   db.run('INSERT INTO students (name) VALUES (?)', [name], function (err) {
     if (err) {
+      if (err.message.includes('UNIQUE constraint failed')) {
+        // Alumno ya existe, verificar si está inactivo para reactivarlo
+        db.run('UPDATE students SET isActive = 1 WHERE name = ?', [name], function (updateErr) {
+          if (updateErr) {
+            res.status(500).json({ error: updateErr.message });
+          } else if (this.changes > 0) {
+            res.json({ message: 'Alumno reactivado', name });
+          } else {
+            res.status(400).json({ error: 'El alumno ya existe y está activo' });
+          }
+        });
+        return;
+      }
       res.status(500).json({ error: err.message });
       return;
     }
@@ -554,28 +611,60 @@ app.delete('/api/students/:id', (req, res) => {
 
 // 4. Guardar captura
 app.post('/api/captures', (req, res) => {
-  const { studentId, subject, imageData, method, confidence, isClassified } = req.body;
+  const { studentId, subject, subject_id, imageData, method, confidence, isClassified } = req.body;
 
-  if (!studentId || !subject || !imageData) {
+  if (!studentId || (!subject && !subject_id) || !imageData) {
     res.status(400).json({ error: 'Datos incompletos' });
     return;
   }
 
-  // Obtener datos del alumno y asignatura
+  // Obtener datos del alumno
   db.get('SELECT name, course_id FROM students WHERE id = ?', [studentId], (err, student) => {
     if (err || !student) {
       res.status(500).json({ error: 'Alumno no encontrado' });
       return;
     }
 
-    // Buscar el ID de la asignatura
-    db.get('SELECT id FROM subjects WHERE name = ?', [subject], (err, subjectRow) => {
-      if (err || !subjectRow) {
-        res.status(500).json({ error: 'Asignatura no encontrada' });
-        return;
+    // Buscar o usar el ID de la asignatura
+    const getSubjectId = new Promise((resolve, reject) => {
+      if (subject_id) {
+        // Verificar que el ID existe
+        db.get('SELECT id, name FROM subjects WHERE id = ?', [subject_id], (err, row) => {
+          if (err || !row) {
+            // Fallback: usar la primera asignatura disponible
+            db.get('SELECT id, name FROM subjects ORDER BY id ASC LIMIT 1', (err, fallbackRow) => {
+              if (err || !fallbackRow) reject(new Error('No hay asignaturas configuradas'));
+              else resolve(fallbackRow);
+            });
+          } else {
+            resolve(row);
+          }
+        });
+      } else if (subject) {
+        // Fallback al nombre (compatibilidad antigua)
+        db.get('SELECT id, name FROM subjects WHERE name = ?', [subject], (err, row) => {
+          if (err || !row) {
+            // Fallback: usar la primera asignatura disponible
+            db.get('SELECT id, name FROM subjects ORDER BY id ASC LIMIT 1', (err, fallbackRow) => {
+              if (err || !fallbackRow) reject(new Error('No hay asignaturas configuradas'));
+              else resolve(fallbackRow);
+            });
+          } else {
+            resolve(row);
+          }
+        });
+      } else {
+        // Si no hay nada, usar la primera disponible
+        db.get('SELECT id, name FROM subjects ORDER BY id ASC LIMIT 1', (err, fallbackRow) => {
+          if (err || !fallbackRow) reject(new Error('No hay asignaturas configuradas'));
+          else resolve(fallbackRow);
+        });
       }
+    });
 
-      const subjectId = subjectRow.id;
+    getSubjectId.then(subjectRow => {
+      const finalSubjectId = subjectRow.id;
+      const finalSubjectName = subjectRow.name;
 
       // Crear directorio de evidencias si no existe
       const evidencesDir = path.join(PORTFOLIOS_DIR, 'evidences');
@@ -584,7 +673,7 @@ app.post('/api/captures', (req, res) => {
       }
 
       // Generar nombre de archivo con formato móvil: [SUBJECT-ID]_[STUDENT-NAME]_[TIMESTAMP].jpg
-      const subjectPrefix = generateSubjectId(subject);
+      const subjectPrefix = generateSubjectId(finalSubjectName);
       const studentName = normalizeStudentName(student.name);
       const timestamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, '').replace('T', '_');
       const filename = `${subjectPrefix}_${studentName}_${timestamp}.jpg`;
@@ -610,7 +699,7 @@ app.post('/api/captures', (req, res) => {
           [
             studentId,
             student.course_id,
-            subjectId,
+            finalSubjectId,
             'IMG',
             relativePath,
             captureDate,
@@ -628,21 +717,49 @@ app.post('/api/captures', (req, res) => {
             res.json({
               id: this.lastID,
               filename,
-              subject,
+              subject: finalSubjectName,
               message: 'Imagen guardada correctamente'
             });
           }
         );
       });
+    }).catch(error => {
+      res.status(500).json({ error: error.message });
     });
   });
 });
 
-// 4. Obtener evidencias de un alumno (compatible con frontend antiguo)
+// 3.1. Obtener TODAS las evidencias (para la galería global)
+app.get('/api/captures', (req, res) => {
+  db.all(
+    `SELECT 
+      e.id,
+      e.student_id as studentId,
+      st.name as studentName,
+      s.name as subject,
+      e.file_path as imagePath,
+      e.capture_date as timestamp,
+      e.confidence,
+      e.method,
+      e.is_reviewed as isClassified
+    FROM evidences e
+    LEFT JOIN subjects s ON e.subject_id = s.id
+    LEFT JOIN students st ON e.student_id = st.id
+    ORDER BY e.capture_date DESC`,
+    (err, rows) => {
+      if (err) {
+        res.status(500).json({ error: err.message });
+        return;
+      }
+      res.json(rows);
+    }
+  );
+});
+
+// 4. Obtener evidencias de un alumno
 app.get('/api/captures/:studentId', (req, res) => {
   const { studentId } = req.params;
 
-  // Query con JOIN para obtener el nombre de la asignatura
   db.all(
     `SELECT 
       e.id,
@@ -666,6 +783,40 @@ app.get('/api/captures/:studentId', (req, res) => {
       res.json(rows);
     }
   );
+});
+
+// 4.1. Eliminar evidencia individual
+app.delete('/api/evidences/:id', (req, res) => {
+  const { id } = req.params;
+
+  // Primero obtener la ruta del archivo para borrarlo del disco
+  db.get('SELECT file_path FROM evidences WHERE id = ?', [id], (err, row) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    if (!row) {
+      return res.status(404).json({ error: 'Evidencia no encontrada' });
+    }
+
+    const fullPath = path.join(PORTFOLIOS_DIR, row.file_path);
+
+    // Borrar de la base de datos
+    db.run('DELETE FROM evidences WHERE id = ?', [id], function (err) {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+
+      // Intentar borrar el archivo físico (no fallar si no existe)
+      if (fs.existsSync(fullPath)) {
+        fs.unlink(fullPath, (err) => {
+          if (err) console.error(`Error borrando archivo físico: ${fullPath}`, err);
+          else console.log(`✅ Archivo borrado: ${fullPath}`);
+        });
+      }
+
+      res.json({ success: true, message: 'Evidencia eliminada correctamente' });
+    });
+  });
 });
 
 // 5. Activar Modo Sesión (15 minutos)
@@ -721,6 +872,151 @@ app.post('/api/session/stop', (req, res) => {
   });
 });
 
+// 9. Eliminar estudiante (baja lógica)
+app.delete('/api/students/:id', (req, res) => {
+  const { id } = req.params;
+  db.run('UPDATE students SET isActive = 0 WHERE id = ?', [id], function (err) {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json({ message: 'Estudiante dado de baja', changes: this.changes });
+  });
+});
+
+// === GESTIÓN DE CURSOS ===
+
+// 10. Listar cursos
+app.get('/api/courses', (req, res) => {
+  const { active } = req.query;
+  let query = 'SELECT * FROM courses';
+  const params = [];
+
+  if (active !== undefined) {
+    query += ' WHERE is_active = ?';
+    params.push(active === 'true' ? 1 : 0);
+  }
+
+  query += ' ORDER BY start_date DESC';
+
+  db.all(query, params, (err, rows) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json(rows);
+  });
+});
+
+// 11. Crear curso
+app.post('/api/courses', (req, res) => {
+  const { name, start_date } = req.body;
+  if (!name) return res.status(400).json({ error: 'Nombre del curso requerido' });
+
+  const startDate = start_date || new Date().toISOString();
+
+  db.run(
+    'INSERT INTO courses (name, start_date, is_active) VALUES (?, ?, 1)',
+    [name, startDate],
+    function (err) {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json({ id: this.lastID, name, start_date: startDate, is_active: 1 });
+    }
+  );
+});
+
+// 12. Archivar curso
+app.put('/api/courses/:id/archive', (req, res) => {
+  const { id } = req.params;
+  const endDate = new Date().toISOString();
+
+  db.run(
+    'UPDATE courses SET is_active = 0, end_date = ? WHERE id = ?',
+    [endDate, id],
+    function (err) {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json({ message: 'Curso archivado', changes: this.changes });
+    }
+  );
+});
+
+// 13. Reactivar curso
+app.put('/api/courses/:id/reactivate', (req, res) => {
+  const { id } = req.params;
+
+  db.run(
+    'UPDATE courses SET is_active = 1, end_date = NULL WHERE id = ?',
+    [id],
+    function (err) {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json({ message: 'Curso reactivado', changes: this.changes });
+    }
+  );
+});
+
+// 14. Eliminar curso completamente (CASDADA)
+app.delete('/api/courses/:id', (req, res) => {
+  const { id } = req.params;
+
+  // 1. Obtener todos los alumnos del curso
+  db.all('SELECT id FROM students WHERE course_id = ?', [id], (err, students) => {
+    if (err) return res.status(500).json({ error: err.message });
+
+    const studentIds = students.map(s => s.id);
+    if (studentIds.length === 0) {
+      // Si no hay alumnos, borrar curso directamente
+      deleteCourseRecord(id, res);
+      return;
+    }
+
+    // 2. Obtener todas las evidencias de estos alumnos para borrar archivos físicos
+    const placeholders = studentIds.map(() => '?').join(',');
+    db.all(`SELECT file_path, thumbnail_path FROM evidences WHERE student_id IN (${placeholders})`, studentIds, (err, rows) => {
+      if (err) console.error('Error obteniendo evidencias para borrar:', err);
+
+      // Borrar archivos físicos
+      if (rows && rows.length > 0) {
+        rows.forEach(row => {
+          try {
+            // Intentar borrar archivo original
+            const fullPath = path.join(PORTFOLIOS_DIR, row.file_path);
+            if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
+
+            // Intentar borrar thumbnail
+            if (row.thumbnail_path) {
+              const thumbPath = path.join(PORTFOLIOS_DIR, row.thumbnail_path);
+              if (fs.existsSync(thumbPath)) fs.unlinkSync(thumbPath);
+            }
+          } catch (e) {
+            console.error('Error borrando archivo físico:', e.message);
+          }
+        });
+      }
+
+      // 3. Borrar registros en BD (evidences, face_profiles, students)
+      db.serialize(() => {
+        // Borrar evidencias
+        db.run(`DELETE FROM evidences WHERE student_id IN (${placeholders})`, studentIds);
+
+        // Borrar perfiles faciales
+        db.run(`DELETE FROM face_profiles WHERE studentId IN (${placeholders})`, studentIds);
+
+        // Borrar logs de reconocimiento
+        db.run(`DELETE FROM recognition_logs WHERE studentId IN (${placeholders})`, studentIds);
+
+        // Borrar alumnos
+        db.run(`DELETE FROM students WHERE course_id = ?`, [id], (err) => {
+          if (err) return res.status(500).json({ error: err.message });
+
+          // 4. Finalmente, borrar el curso
+          deleteCourseRecord(id, res);
+        });
+      });
+    });
+  });
+});
+
+function deleteCourseRecord(id, res) {
+  db.run('DELETE FROM courses WHERE id = ?', [id], function (err) {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json({ message: 'Curso y todos sus datos eliminados correctamente', changes: this.changes });
+  });
+}
+
 // ==================== ENDPOINTS DE RECONOCIMIENTO FACIAL ====================
 
 // 8. Guardar descriptor facial de un estudiante (entrenamiento)
@@ -763,9 +1059,19 @@ app.post('/api/faces/search', (req, res) => {
             res.status(500).json({ error: err.message });
             return;
           }
+
+          // FIX: Verificar mensaje de "error al guardar la foto"
+          // Si el alumno no existe en la BD (borrado pero con perfil facial huérfano),
+          // devolver desconocido para evitar que el frontend intente guardar.
+          if (!row) {
+            console.warn(`⚠️ Perfil facial huérfano detectado para ID ${match.studentId}. Ignorando.`);
+            res.json({ studentId: null, confidence: 0 });
+            return;
+          }
+
           res.json({
             studentId: match.studentId,
-            name: row?.name || 'Desconocido',
+            name: row.name,
             confidence: match.confidence,
             distance: match.distance
           });
@@ -809,6 +1115,94 @@ app.delete('/api/faces/:studentId', (req, res) => {
     });
 });
 
+// === ENDPOINTS DE ASIGNATURAS ===
+
+// 12. Obtener lista de asignaturas
+app.get('/api/subjects', (req, res) => {
+  db.all('SELECT * FROM subjects ORDER BY is_default DESC, name ASC', (err, rows) => {
+    if (err) {
+      res.status(500).json({ error: err.message });
+      return;
+    }
+    res.json(rows);
+  });
+});
+
+// 13. Añadir nueva asignatura
+app.post('/api/subjects', (req, res) => {
+  const { name, color, icon, is_default } = req.body;
+  if (!name) {
+    res.status(400).json({ error: 'El nombre es requerido' });
+    return;
+  }
+
+  db.run(
+    'INSERT INTO subjects (name, color, icon, is_default) VALUES (?, ?, ?, ?)',
+    [name, color, icon, is_default ? 1 : 0],
+    function (err) {
+      if (err) {
+        res.status(500).json({ error: err.message });
+        return;
+      }
+      res.json({ id: this.lastID, name, message: 'Asignatura añadida' });
+    }
+  );
+});
+
+// 14. Actualizar asignatura
+app.put('/api/subjects/:id', (req, res) => {
+  const { id } = req.params;
+  const { name, color, icon, is_default } = req.body;
+
+  db.run(
+    'UPDATE subjects SET name = ?, color = ?, icon = ?, is_default = ? WHERE id = ?',
+    [name, color, icon, is_default ? 1 : 0, id],
+    function (err) {
+      if (err) {
+        res.status(500).json({ error: err.message });
+        return;
+      }
+      if (this.changes === 0) {
+        res.status(404).json({ error: 'Asignatura no encontrada' });
+        return;
+      }
+      res.json({ message: 'Asignatura actualizada' });
+    }
+  );
+});
+
+// 15. Eliminar asignatura
+app.delete('/api/subjects/:id', (req, res) => {
+  const { id } = req.params;
+
+  // Verificar si hay evidencias asociadas antes de borrar
+  db.get('SELECT COUNT(*) as count FROM evidences WHERE subject_id = ?', [id], (err, row) => {
+    if (err) {
+      res.status(500).json({ error: err.message });
+      return;
+    }
+
+    if (row && row.count > 0) {
+      res.status(400).json({
+        error: 'No se puede eliminar la asignatura porque tiene evidencias asociadas. Reásignalas primero.'
+      });
+      return;
+    }
+
+    db.run('DELETE FROM subjects WHERE id = ?', [id], function (err) {
+      if (err) {
+        res.status(500).json({ error: err.message });
+        return;
+      }
+      if (this.changes === 0) {
+        res.status(404).json({ error: 'Asignatura no encontrada' });
+        return;
+      }
+      res.json({ message: 'Asignatura eliminada' });
+    });
+  });
+});
+
 // ==================== ENDPOINTS DE MANTENIMIENTO DEL SISTEMA ====================
 
 // 12. Resetear base de datos y archivos
@@ -816,28 +1210,40 @@ app.post('/api/system/reset', (req, res) => {
   const { mode } = req.body; // mode: 'photos' o 'students'
 
   if (mode === 'photos') {
-    // BORRAR SOLO FOTOS: Limpia tabla captures y archivos físicos
-    db.run('DELETE FROM captures', (err) => {
-      if (err) return res.status(500).json({ error: 'Error limpiando capturas' });
-
-      if (err) return res.status(500).json({ error: 'Error limpiando capturas' });
+    // BORRAR SOLO FOTOS: Limpia tabla evidences y archivos físicos
+    db.run('DELETE FROM evidences', (err) => {
+      if (err) return res.status(500).json({ error: 'Error limpiando evidencias' });
 
       try {
+        // 1. Limpiar fotos en carpetas de alumnos
         const folders = fs.readdirSync(PORTFOLIOS_DIR);
         for (const folder of folders) {
-          if (folder === '.gitkeep' || folder === '_temporal_') continue;
+          if (folder === '.gitkeep') continue;
           const fullPath = path.join(PORTFOLIOS_DIR, folder);
           if (fs.lstatSync(fullPath).isDirectory()) {
-            // Borramos el contenido de las carpetas de alumnos (las asignaturas)
-            // pero mantenemos la carpeta del alumno si queremos, o la borramos también.
-            // Para "borrar solo fotos" manteniendo alumnos, borramos el contenido de la carpeta del alumno.
-            fs.rmSync(fullPath, { recursive: true, force: true });
-            fs.mkdirSync(fullPath); // Recreamos la carpeta vacía
+            if (folder === '_temporal_' || folder === 'evidences') {
+              // Limpiar contenido pero mantener carpeta
+              const files = fs.readdirSync(fullPath);
+              for (const file of files) {
+                if (file !== '.gitkeep') {
+                  fs.rmSync(path.join(fullPath, file), { recursive: true, force: true });
+                }
+              }
+            } else {
+              // Antiguo sistema o carpetas personalizadas: borrar contenido
+              const files = fs.readdirSync(fullPath);
+              for (const file of files) {
+                if (file !== '.gitkeep') {
+                  fs.rmSync(path.join(fullPath, file), { recursive: true, force: true });
+                }
+              }
+            }
           }
         }
-        res.json({ message: 'Fotos y registros de captura borrados' });
+        res.json({ message: 'Fotos y registros de evidencia borrados (incluyendo temporales)' });
       } catch (e) {
-        res.status(500).json({ error: 'Error borrando archivos físicos' });
+        console.error('Error cleanup:', e);
+        res.status(500).json({ error: 'Error borrando archivos físicos: ' + e.message });
       }
     });
   } else if (mode === 'students') {
@@ -854,100 +1260,51 @@ app.post('/api/system/reset', (req, res) => {
   }
 });
 
-// 13. Sincronizar carpetas con base de datos
+// 13. Importar evidencias desde carpeta _temporal_
 app.post('/api/system/sync', async (req, res) => {
-  if (!fs.existsSync(PORTFOLIOS_DIR)) {
-    res.status(404).json({ error: 'Carpeta portfolios no encontrada' });
-    return;
+  const tempPath = path.join(PORTFOLIOS_DIR, '_temporal_');
+  if (!fs.existsSync(tempPath)) {
+    return res.json({ studentsCreated: 0, capturesCreated: 0, message: 'Carpeta temporal vacía' });
   }
 
   try {
-    const studentFolders = fs.readdirSync(PORTFOLIOS_DIR).filter(f => {
-      const fullPath = path.join(PORTFOLIOS_DIR, f);
-      return fs.lstatSync(fullPath).isDirectory() && f !== '_temporal_';
-    });
-
-    let studentsCreated = 0;
+    const files = fs.readdirSync(tempPath).filter(f => f.toLowerCase().endsWith('.jpg'));
     let capturesCreated = 0;
 
-    for (const folder of studentFolders) {
-      // Intentar extraer ID: "Nombre_Apellido_ID" o "student_ID"
-      const parts = folder.split('_');
-      let studentId = parseInt(parts[parts.length - 1]);
-      let studentName = parts.slice(0, -1).join(' ') || folder;
+    // Obtener asignaturas para mapeo por nombre
+    const subjects = await new Promise((resolve) => {
+      db.all('SELECT id, name FROM subjects', (err, rows) => resolve(rows || []));
+    });
 
-      // Si no hay ID al final, creamos el alumno y renombramos la carpeta
-      if (isNaN(studentId)) {
-        studentName = folder.replace(/_/g, ' '); // Si era "Diego_Perez" lo convertimos a "Diego Perez"
-        await new Promise((resolve) => {
-          db.run('INSERT INTO students (name) VALUES (?)', [studentName], function (err) {
-            if (!err) {
-              const newId = this.lastID;
-              const newFolderName = getStudentFolderName(newId, studentName);
-              try {
-                fs.renameSync(path.join(PORTFOLIOS_DIR, folder), path.join(PORTFOLIOS_DIR, newFolderName));
-                console.log(`🔄 Sincronizado y renombrado: ${folder} -> ${newFolderName}`);
-                studentsCreated++;
-                // Actualizamos variables para procesar capturas después
-                folderToProcess = newFolderName;
-                studentId = newId;
-              } catch (e) {
-                console.error('Error renombrando carpeta en sync:', e);
-              }
-            }
-            resolve();
-          });
-        });
-      } else {
-        // El formato ya es Nombre_ID, asegurar que existe en BD
-        await new Promise((resolve) => {
-          db.get('SELECT id FROM students WHERE id = ?', [studentId], (err, row) => {
-            if (!row) {
-              db.run('INSERT INTO students (id, name) VALUES (?, ?)', [studentId, studentName], () => {
-                studentsCreated++;
-                resolve();
-              });
-            } else {
-              resolve();
-            }
-          });
-        });
+    for (const filename of files) {
+      // Intentar identificar por nombre de archivo: "Asignatura_Timestamp.jpg"
+      // o "NombreAlumno_Asignatura_Timestamp.jpg" (si el usuario lo puso manual)
+      const parts = filename.replace('.jpg', '').split('_');
+      let identifiedSubject = null;
+
+      // 1. Buscar si alguna parte coincide con una asignatura
+      for (const part of parts) {
+        identifiedSubject = subjects.find(s =>
+          s.name.toLowerCase() === part.toLowerCase() ||
+          part.toLowerCase().includes(s.name.toLowerCase())
+        );
+        if (identifiedSubject) break;
       }
 
-      // 2. Escanear asignaturas (usar el ID y nombre actualizados si se renombró)
-      const currentFolder = isNaN(parseInt(parts[parts.length - 1])) ? getStudentFolderName(studentId, studentName) : folder;
-      const studentPath = path.join(PORTFOLIOS_DIR, currentFolder);
-      const subjects = fs.readdirSync(studentPath).filter(f =>
-        fs.lstatSync(path.join(studentPath, f)).isDirectory()
-      );
-
-      for (const subject of subjects) {
-        const subjectPath = path.join(studentPath, subject);
-        const images = fs.readdirSync(subjectPath).filter(f => f.toLowerCase().endsWith('.jpg'));
-
-        for (const img of images) {
-          const relativePath = `${folder}/${subject}/${img}`;
-          await new Promise((resolve) => {
-            db.get('SELECT id FROM captures WHERE imagePath = ?', [relativePath], (err, row) => {
-              if (!row) {
-                db.run(
-                  'INSERT INTO captures (studentId, subject, imagePath, isClassified) VALUES (?, ?, ?, 1)',
-                  [studentId, subject, relativePath],
-                  () => {
-                    capturesCreated++;
-                    resolve();
-                  }
-                );
-              } else {
-                resolve();
-              }
-            });
-          });
-        }
-      }
+      // 2. Buscar si alguna parte coincide con un alumno (solo si hay NombreAlumno_...)
+      // Por ahora el backend solo lista los archivos y deja que el frontend (con IA) 
+      // identifique al alumno de forma robusta. Aquí solo hacemos parsing básico.
     }
 
-    res.json({ studentsCreated, capturesCreated, message: 'Sincronización completada' });
+    // Nota: El usuario quiere que este botón sea "Smart". 
+    // Como la IA está en el cliente, el backend simplemente devolverá la lista de archivos
+    // y el frontend hará el proceso en lote.
+
+    res.json({
+      capturesCreated: 0, // El proceso real se hará desde el frontend ahora
+      filesFound: files.length,
+      message: 'Escaneo de temporal completado'
+    });
   } catch (error) {
     console.error('Error en sincronización:', error);
     res.status(500).json({ error: error.message });
@@ -980,62 +1337,42 @@ app.get('/api/system/pending', (req, res) => {
 // Asegurar que se sirva la carpeta portfolios como estática para poder ver las fotos de _temporal_
 app.use('/_temporal_', express.static(path.join(PORTFOLIOS_DIR, '_temporal_')));
 
-// 15. Mover archivo de _temporal_ a portfolio definitivo
-app.post('/api/system/move', (req, res) => {
-  const { filename, studentId, subject } = req.body;
 
-  db.get('SELECT name FROM students WHERE id = ?', [studentId], (err, student) => {
-    if (err || !student) return res.status(404).json({ error: 'Alumno no encontrado' });
-
-    const studentFolderName = getStudentFolderName(studentId, student.name);
-    const sourcePath = path.join(PORTFOLIOS_DIR, '_temporal_', filename);
-    const destDir = path.join(PORTFOLIOS_DIR, studentFolderName, subject);
-    const destPath = path.join(destDir, filename);
-
-    if (!fs.existsSync(sourcePath)) return res.status(404).json({ error: 'Archivo original no encontrado' });
-
-    if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true });
-
-    try {
-      fs.renameSync(sourcePath, destPath);
-
-      // Registrar en BD
-      const relativePath = `${studentFolderName}/${subject}/${filename}`;
-      db.run(
-        'INSERT INTO captures (studentId, subject, imagePath, method, isClassified) VALUES (?, ?, ?, ?, ?)',
-        [studentId, subject, relativePath, 'imported', 1],
-        function (err) {
-          if (err) return res.status(500).json({ error: err.message });
-          res.json({ message: 'Archivo movido y registrado', id: this.lastID });
-        }
-      );
-    } catch (e) {
-      res.status(500).json({ error: e.message });
-    }
-  });
-});
 
 // 16. Guardar captura temporal (Modo Rápido)
 app.post('/api/system/temp-capture', (req, res) => {
-  const { subject, imageData } = req.body;
+  const { subject, subject_id, imageData } = req.body;
 
-  if (!subject || !imageData) {
+  if ((!subject && !subject_id) || !imageData) {
     return res.status(400).json({ error: 'Datos incompletos' });
   }
 
-  const tempPath = path.join(PORTFOLIOS_DIR, '_temporal_');
-  if (!fs.existsSync(tempPath)) fs.mkdirSync(tempPath, { recursive: true });
+  // Obtener nombre de asignatura para el prefijo si se pasa ID
+  const getSubjectName = new Promise((resolve) => {
+    if (subject_id) {
+      db.get('SELECT name FROM subjects WHERE id = ?', [subject_id], (err, row) => {
+        resolve(row ? row.name : (subject || 'General'));
+      });
+    } else {
+      resolve(subject || 'General');
+    }
+  });
 
-  const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
-  // Prefijamos la asignatura para que el asistente de clasificación la detecte luego
-  const filename = `${subject}_${timestamp}.jpg`;
-  const filepath = path.join(tempPath, filename);
+  getSubjectName.then(name => {
+    const tempPath = path.join(PORTFOLIOS_DIR, '_temporal_');
+    if (!fs.existsSync(tempPath)) fs.mkdirSync(tempPath, { recursive: true });
 
-  const imageBuffer = Buffer.from(imageData.replace(/^data:image\/\w+;base64,/, ''), 'base64');
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+    // Prefijamos la asignatura para que el asistente de clasificación la detecte luego
+    const filename = `${name}_${timestamp}.jpg`;
+    const filepath = path.join(tempPath, filename);
 
-  fs.writeFile(filepath, imageBuffer, (err) => {
-    if (err) return res.status(500).json({ error: 'Error guardando imagen temporal' });
-    res.json({ message: 'Imagen guardada en temporal', filename });
+    const imageBuffer = Buffer.from(imageData.replace(/^data:image\/\w+;base64,/, ''), 'base64');
+
+    fs.writeFile(filepath, imageBuffer, (err) => {
+      if (err) return res.status(500).json({ error: 'Error guardando imagen temporal' });
+      res.json({ message: 'Imagen guardada en temporal', filename });
+    });
   });
 });
 
@@ -1122,6 +1459,44 @@ async function gracefulShutdown(signal) {
 
 // ==================== API DE SINCRONIZACIÓN (MÓVIL <-> ESCRITORIO) ====================
 
+/**
+ * Obtiene el ID del curso activo, o crea uno por defecto si no existe ninguno
+ * @returns {Promise<number>} ID del curso activo
+ */
+function getOrCreateActiveCourse() {
+  return new Promise((resolve, reject) => {
+    // Buscar curso activo
+    db.get('SELECT id FROM courses WHERE is_active = 1 ORDER BY start_date DESC LIMIT 1', (err, row) => {
+      if (err) {
+        return reject(err);
+      }
+
+      if (row) {
+        // Ya existe un curso activo
+        return resolve(row.id);
+      }
+
+      // No hay curso activo, crear uno por defecto
+      const currentYear = new Date().getFullYear();
+      const courseName = `Curso ${currentYear}-${currentYear + 1}`;
+      const startDate = new Date().toISOString();
+
+      db.run(
+        'INSERT INTO courses (name, start_date, is_active) VALUES (?, ?, 1)',
+        [courseName, startDate],
+        function (err) {
+          if (err) {
+            return reject(err);
+          }
+          console.log(`✅ Curso por defecto creado durante sync: ${courseName} (ID: ${this.lastID})`);
+          resolve(this.lastID);
+        }
+      );
+    });
+  });
+}
+
+
 // 1. Obtener metadatos completos (PULL desde móvil)
 app.get('/api/sync/metadata', (req, res) => {
   const metadata = {
@@ -1153,96 +1528,152 @@ app.get('/api/sync/metadata', (req, res) => {
 });
 
 // 2. Recibir datos nuevos (PUSH desde móvil)
-app.post('/api/sync/push', (req, res) => {
+app.post('/api/sync/push', async (req, res) => {
   const { students, evidences } = req.body;
   const results = { students: 0, evidences: 0, errors: [] };
 
-  db.serialize(() => {
-    // Procesar estudiantes
+  try {
+    // 1. Preparar infraestructura básica
+    const activeCourseId = await getOrCreateActiveCourse();
+    const validCourseIds = await new Promise((resolve) => {
+      db.all('SELECT id FROM courses', (err, rows) => resolve((rows || []).map(r => r.id)));
+    });
+
+    // 2. Obtener estudiantes existentes para mapeo por nombre
+    const existingStudents = await new Promise((resolve) => {
+      db.all('SELECT id, name FROM students', (err, rows) => resolve(rows || []));
+    });
+
+    // Mapa de nombre normalizado -> desktopId
+    const studentsByName = {};
+    existingStudents.forEach(s => {
+      studentsByName[normalizeNameForComparison(s.name)] = s.id;
+    });
+
+    // Mapa de mobileId -> desktopId (para ligar evidencias luego)
+    const mobileToDesktopIdMap = {};
+
+    // 3. Procesar Estudiantes (Uno a uno para gestionar el mapeo de IDs correctamente)
     if (students && students.length > 0) {
-      // Usamos REPLACE para actualizar si ya existe (especialmente para añadir embeddings)
-      const stmt = db.prepare(`
-        INSERT OR REPLACE INTO students (id, name, course_id, enrollmentDate, isActive, face_embeddings_192)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `);
-
-      students.forEach(s => {
-        // Convertir array de embeddings a Buffer si viene como array
-        let embeddingsBuffer = null;
-        if (s.face_embeddings_192) {
-          if (Array.isArray(s.face_embeddings_192)) {
-            embeddingsBuffer = Buffer.from(s.face_embeddings_192);
-          } else if (s.face_embeddings_192.type === 'Buffer') {
-            embeddingsBuffer = Buffer.from(s.face_embeddings_192.data);
-          } else {
-            embeddingsBuffer = s.face_embeddings_192;
+      for (const s of students) {
+        try {
+          let courseId = s.courseId;
+          if (!courseId || courseId === 0 || !validCourseIds.includes(courseId)) {
+            courseId = activeCourseId;
           }
+
+          let embeddingsBuffer = null;
+          if (s.face_embeddings_192) {
+            if (Array.isArray(s.face_embeddings_192)) {
+              embeddingsBuffer = Buffer.from(s.face_embeddings_192);
+            } else if (s.face_embeddings_192.type === 'Buffer') {
+              embeddingsBuffer = Buffer.from(s.face_embeddings_192.data);
+            } else {
+              embeddingsBuffer = s.face_embeddings_192;
+            }
+          }
+
+          const normalizedMobileName = normalizeNameForComparison(s.name);
+          const existingId = studentsByName[normalizedMobileName];
+
+          if (existingId) {
+            // Actualizar estudiante existente
+            await new Promise((resolve, reject) => {
+              db.run(
+                `UPDATE students SET 
+                  course_id = ?, 
+                  isActive = ?, 
+                  face_embeddings_192 = ?
+                WHERE id = ?`,
+                [courseId, s.isActive ? 1 : 0, embeddingsBuffer, existingId],
+                (err) => {
+                  if (err) reject(err);
+                  else resolve();
+                }
+              );
+            });
+            mobileToDesktopIdMap[s.id] = existingId;
+            results.students++;
+          } else {
+            // Crear estudiante nuevo
+            const newId = await new Promise((resolve, reject) => {
+              db.run(
+                `INSERT INTO students (name, course_id, enrollmentDate, isActive, face_embeddings_192)
+                VALUES (?, ?, ?, ?, ?)`,
+                [s.name, courseId, s.enrollmentDate, s.isActive ? 1 : 0, embeddingsBuffer],
+                function (err) {
+                  if (err) reject(err);
+                  else resolve(this.lastID);
+                }
+              );
+            });
+            mobileToDesktopIdMap[s.id] = newId;
+            results.students++;
+          }
+        } catch (err) {
+          results.errors.push(`Error procesando estudiante ${s.name}: ${err.message}`);
         }
-
-        stmt.run([
-          s.id,
-          s.name,
-          s.courseId,
-          s.enrollmentDate,
-          s.isActive ? 1 : 0,
-          embeddingsBuffer
-        ], function (err) {
-          if (err) results.errors.push(`Error sync student ${s.id}: ${err.message}`);
-          else results.students++;
-        });
-      });
-      stmt.finalize();
+      }
     }
 
-    // Procesar evidencias (metadatos)
+    // 4. Obtener evidencias existentes para evitar duplicados (por file_path)
+    const existingEvidences = await new Promise((resolve) => {
+      db.all('SELECT file_path FROM evidences', (err, rows) => resolve(new Set((rows || []).map(r => r.file_path))));
+    });
+
+    // 5. Procesar Evidencias
     if (evidences && evidences.length > 0) {
-      const stmt = db.prepare(`
-        INSERT OR IGNORE INTO evidences (
-          id, student_id, course_id, subject_id, type, file_path, 
-          capture_date, confidence, method, is_reviewed, file_size
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `);
+      for (const e of evidences) {
+        try {
+          // Si ya existe la ruta, ignorar para no duplicar
+          if (existingEvidences.has(e.filePath)) continue;
 
-      evidences.forEach(e => {
-        stmt.run([
-          e.id, e.studentId, e.courseId, e.subjectId, e.type, e.filePath,
-          e.captureDate, e.confidence, e.method, e.isReviewed ? 1 : 0, e.fileSize
-        ], function (err) {
-          if (err) results.errors.push(`Error sync evidence ${e.id}: ${err.message}`);
-          else if (this.changes > 0) results.evidences++;
-        });
-      });
-      stmt.finalize(() => {
-        res.json({ success: true, results });
-      });
-    } else {
-      res.json({ success: true, results });
+          // Traducir student_id usando nuestro mapa
+          const desktopStudentId = mobileToDesktopIdMap[e.studentId] || e.studentId;
+
+          await new Promise((resolve, reject) => {
+            db.run(
+              `INSERT INTO evidences (
+                student_id, course_id, subject_id, type, file_path, 
+                capture_date, confidence, method, is_reviewed, file_size
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              [
+                desktopStudentId, e.courseId, e.subjectId, e.type, e.filePath,
+                e.captureDate, e.confidence, e.method, e.isReviewed ? 1 : 0, e.fileSize
+              ],
+              (err) => {
+                if (err) reject(err);
+                else resolve();
+              }
+            );
+          });
+          results.evidences++;
+        } catch (err) {
+          results.errors.push(`Error sincronizando evidencia ${e.filePath}: ${err.message}`);
+        }
+      }
     }
-  });
+
+    res.json({ success: true, results });
+  } catch (error) {
+    console.error('❌ Error en sincronización:', error);
+    results.errors.push(`Error general de sincronización: ${error.message}`);
+    res.status(500).json({ success: false, results });
+  }
 });
 
 // 3. Subir archivo de evidencia (desde móvil)
-app.post('/api/sync/files', (req, res) => {
-  // Nota: En una implementación real usaríamos middleware como 'multer' para multipart/form-data
-  // Aquí asumimos envío raw body o base64 para simplificar, similar a /api/captures
-
-  const { filename, fileData } = req.body;
-  if (!filename || !fileData) {
-    return res.status(400).json({ error: 'Filename and fileData required' });
-  }
-
-  // Verificar si el baúl está bloqueado
-  portfolioVault.isLocked().then(locked => {
-    // Si está bloqueado, NO permitimos guardar archivos porque no podemos encriptarlos correctamente
-    // sin la contraseña del usuario (que no queremos transmitir por la red)
-    /*
-    if (locked) {
-      return res.status(403).json({ error: 'Vault is locked. Unlock desktop app to sync files.' });
+// 3. Subir archivo de evidencia (desde móvil)
+app.post('/api/sync/files', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
     }
-    */
-    // REVISIÓN: En realidad, si el baúl está bloqueado, podríamos guardar los archivos ENCRIPTADOS
-    // si tuviéramos la clave pública o similar, pero aquí la encriptación es simétrica.
-    // Opción segura: Solo permitir sync si el baúl está desbloqueado.
+
+    const filename = req.file.originalname;
+
+    // Verificar si el baúl está bloqueado
+    const locked = await portfolioVault.isLocked();
 
     if (locked) {
       return res.status(503).json({
@@ -1256,16 +1687,16 @@ app.post('/api/sync/files', (req, res) => {
     }
 
     const filepath = path.join(evidencesDir, filename);
-    const buffer = Buffer.from(fileData, 'base64');
 
-    fs.writeFile(filepath, buffer, (err) => {
-      if (err) {
-        res.status(500).json({ error: 'Error saving file' });
-      } else {
-        res.json({ success: true, filename });
-      }
-    });
-  });
+    // Escribir el archivo desde el buffer de multer
+    fs.writeFileSync(filepath, req.file.buffer);
+
+    console.log(`✅ Archivo sincronizado: ${filename}`);
+    res.json({ success: true, filename });
+  } catch (error) {
+    console.error('❌ Error guardando archivo:', error);
+    res.status(500).json({ error: 'Error saving file' });
+  }
 });
 
 // 4. Descargar archivo de evidencia (hacia móvil)
@@ -1297,28 +1728,224 @@ app.get('/api/sync/files/:filename', (req, res) => {
 });
 
 /**
- * Obtiene la dirección IP local del equipo en la red.
- * @returns {string}
+ * Obtiene las direcciones IP locales del equipo en la red.
+ * Prioriza IPs de red local típicas (192.168.1.x, 192.168.0.x, 10.x.x.x).
+ * @returns {string[]} Lista de IPs
  */
-function getLocalIpAddress() {
+function getLocalIpAddresses() {
   const interfaces = os.networkInterfaces();
+  const addresses = [];
+
   for (const name of Object.keys(interfaces)) {
     for (const iface of interfaces[name]) {
       // Filtrar IPv4 y que no sea loopback (127.0.0.1)
       if (iface.family === 'IPv4' && !iface.internal) {
-        return iface.address;
+        addresses.push(iface.address);
       }
     }
   }
-  return 'localhost';
+
+  // Ordenar para priorizar redes domésticas comunes
+  return addresses.sort((a, b) => {
+    const scoreA = getIpScore(a);
+    const scoreB = getIpScore(b);
+    return scoreB - scoreA;
+  });
 }
+
+function getIpScore(ip) {
+  if (ip.startsWith('192.168.1.')) return 10;
+  if (ip.startsWith('192.168.0.')) return 9;
+  if (ip.startsWith('192.168.')) {
+    // Depriorizar rangos comunes de VM/Docker
+    if (ip.startsWith('192.168.56.')) return 1; // VirtualBox
+    if (ip.startsWith('192.168.99.')) return 1; // Docker Machine
+    return 8;
+  }
+  if (ip.startsWith('10.')) return 7;
+  if (ip.startsWith('172.')) return 6;
+  return 5;
+}
+
+// 4.1. Listar archivos pendientes en _temporal_
+app.get('/api/system/pending', (req, res) => {
+  const tempPath = path.join(PORTFOLIOS_DIR, '_temporal_');
+  if (!fs.existsSync(tempPath)) {
+    return res.json([]);
+  }
+
+  fs.readdir(tempPath, (err, files) => {
+    if (err) return res.status(500).json({ error: err.message });
+
+    const pendingFiles = files
+      .filter(f => /\.(jpg|jpeg|png)$/i.test(f))
+      .map(f => ({
+        name: f,
+        url: `/_temporal_/${f}`
+      }));
+
+    res.json(pendingFiles);
+  });
+});
+
+// 4.2. Sincronizar/Escanear carpeta temporal (trigger)
+app.post('/api/system/sync', (req, res) => {
+  const tempPath = path.join(PORTFOLIOS_DIR, '_temporal_');
+  if (!fs.existsSync(tempPath)) {
+    fs.mkdirSync(tempPath, { recursive: true });
+  }
+  res.json({ message: 'Carpeta temporal escaneada', path: tempPath });
+});
+
+// 4.3. Mover archivo de temporal a evidences
+app.post('/api/system/move', (req, res) => {
+  const { filename, studentId, subject } = req.body;
+
+  if (!filename) {
+    return res.status(400).json({ error: 'Falta el nombre del archivo (filename)' });
+  }
+  if (!studentId || isNaN(parseInt(studentId))) {
+    return res.status(400).json({ error: 'Falta o es inválido el ID del estudiante (studentId)' });
+  }
+
+  const tempPath = path.join(PORTFOLIOS_DIR, '_temporal_', filename);
+  const evidencesDir = path.join(PORTFOLIOS_DIR, 'evidences');
+
+  if (!fs.existsSync(tempPath)) {
+    return res.status(404).json({ error: `El archivo original no existe: ${filename}` });
+  }
+
+  if (!fs.existsSync(evidencesDir)) {
+    try {
+      fs.mkdirSync(evidencesDir, { recursive: true });
+    } catch (e) {
+      return res.status(500).json({ error: 'Error creando carpeta evidences: ' + e.message });
+    }
+  }
+
+  // Resolver ID de asignatura (puede venir nombre o ID)
+  db.serialize(() => {
+    // Preparar promesa para obtener ID de asignatura
+    const getSubjectId = new Promise((resolve, reject) => {
+      if (!subject) {
+        // Fallback: buscar la primera asignatura disponible
+        db.get('SELECT id FROM subjects ORDER BY id ASC LIMIT 1', (err, row) => {
+          if (err) reject(err);
+          else resolve(row ? row.id : 1); // ID 1 como último recurso
+        });
+        return;
+      }
+
+      // Si es un número (o string numérico), asumir que es ID
+      if (!isNaN(parseInt(subject)) && String(parseInt(subject)) === String(subject)) {
+        return resolve(parseInt(subject));
+      }
+
+      // Si es texto (o el parseInt no coincide), buscar por nombre
+      db.get('SELECT id FROM subjects WHERE name = ?', [subject], (err, row) => {
+        if (err) reject(err);
+        else if (row) resolve(row.id);
+        else {
+          // Si no existe, buscar la primera disponible
+          db.get('SELECT id FROM subjects ORDER BY id ASC LIMIT 1', (err, row) => {
+            if (err) reject(err);
+            else resolve(row ? row.id : 1);
+          });
+        }
+      });
+    });
+
+    getSubjectId.then(subjectId => {
+      // 1. Mover archivo
+      const destPath = path.join(evidencesDir, filename);
+
+      try {
+        // Usamos copy + unlink para evitar errores entre diferentes dispositivos/particiones
+        fs.copyFileSync(tempPath, destPath);
+        fs.unlinkSync(tempPath);
+      } catch (err) {
+        console.error('Error moviendo archivo:', err);
+        return res.status(500).json({ error: 'Error al mover el archivo físico: ' + err.message });
+      }
+
+      // 2. Obtener datos del estudiante para la consistencia
+      db.get('SELECT course_id FROM students WHERE id = ?', [studentId], (err, student) => {
+        if (err) {
+          return res.status(500).json({ error: 'Error consultando estudiante: ' + err.message });
+        }
+
+        if (!student) {
+          return res.status(404).json({ error: `Estudiante no encontrado con ID: ${studentId}` });
+        }
+
+        const courseId = student.course_id || 1;
+        const captureDate = new Date().toISOString();
+        const relativePath = `evidences/${filename}`;
+        const fileSize = fs.statSync(destPath).size;
+
+        // 3. Insertar en BD
+        db.run(
+          `INSERT INTO evidences (
+              student_id, course_id, subject_id, type, file_path, 
+              capture_date, confidence, method, is_reviewed, created_at, file_size
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            studentId,
+            courseId,
+            subjectId,
+            'IMG',
+            relativePath,
+            captureDate,
+            1, // Confidence (manual classification)
+            'manual_import',
+            1, // Reviewed
+            captureDate,
+            fileSize
+          ],
+          function (err) {
+            if (err) {
+              return res.status(500).json({ error: err.message });
+            }
+            res.json({ success: true, id: this.lastID });
+          }
+        );
+      });
+    }).catch(err => {
+      res.status(500).json({ error: 'Error resolviendo asignatura: ' + err.message });
+    });
+  });
+});
 
 // 5. Obtener información del sistema (IP y puerto para sincronización)
 app.get('/api/system/info', (req, res) => {
+  const ips = getLocalIpAddresses();
   res.json({
-    ip: getLocalIpAddress(),
+    ip: ips.length > 0 ? ips[0] : 'localhost', // Para compatibilidad
+    ips: ips,
     port: PORT,
     status: 'online'
+  });
+});
+
+// 6. Obtener estadísticas del sistema (alumnos, fotos, ocupación)
+app.get('/api/system/stats', (req, res) => {
+  const stats = {
+    students: 0,
+    evidences: 0,
+    totalSize: 0
+  };
+
+  db.get('SELECT COUNT(*) as count FROM students WHERE isActive = 1', (err, row) => {
+    if (err) return res.status(500).json({ error: err.message });
+    stats.students = row.count;
+
+    db.get('SELECT COUNT(*) as count, SUM(file_size) as size FROM evidences', (err, row) => {
+      if (err) return res.status(500).json({ error: err.message });
+      stats.evidences = row.count || 0;
+      stats.totalSize = row.size || 0;
+
+      res.json(stats);
+    });
   });
 });
 

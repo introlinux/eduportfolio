@@ -160,7 +160,7 @@ class FaceRecognitionService {
         return {
           status: 'unknown',
           confidence: 0,
-          message: 'No te reconozco. Pide ayuda a un profesor.'
+          message: 'No te reconozco. Pide ayuda a tu profe.'
         };
       }
     } catch (error) {
@@ -170,7 +170,7 @@ class FaceRecognitionService {
   }
 
   /**
-   * Capturar y guardar descriptor facial para nuevo alumno
+   * Capturar y guardar descriptor facial para nuevo estudiante
    * Se necesitan 3-5 capturas para entrenar un buen perfil
    * @param {HTMLVideoElement} video 
    * @param {number} studentId 

@@ -1,0 +1,117 @@
+✅ BUGS DE SINCRONIZACIÓN - SOLUCIONADOS (VERSIÓN DESARROLLO)
+================================================================
+Fecha: 11 de Febrero de 2026
+Enfoque: DESARROLLO LOCAL - Reset en lugar de migraciones
+
+
+🐛 PROBLEMA 1: IMÁGENES ROTAS
+==============================
+Síntoma: Imágenes no se sincronizan o aparecen rotas
+
+Causa: BAÚL DE PORTFOLIOS BLOQUEADO
+El servidor rechaza archivos cuando el baúl está encriptado (error 503)
+
+Solución:
+⚠️  DESBLOQUEAR EL BAÚL ANTES DE SINCRONIZAR
+   1. Abre app de escritorio
+   2. Inicia sesión
+   3. Verifica candado abierto
+   4. ENTONCES sincroniza desde móvil
+
+
+🐛 PROBLEMA 2: DROPDOWN CRASH
+==============================
+Síntoma: Pantallazo rojo al abrir evidencia sincronizada
+Error: "There should be exactly one item with [DropdownButton]'s value"
+
+Causa: LA SINCRONIZACIÓN NO USABA EL ID DEL SERVIDOR
+- Creaba asignaturas con IDs auto-incrementados localmente
+- Resultado: "Matemáticas" con ID=1 en servidor pero ID=6 en móvil
+- Dropdown buscaba ID=1 pero solo existía ID=6 → CRASH
+
+Soluciones Implementadas:
+✅ sync_repository.dart - Usa ID del servidor remoto
+✅ evidence_detail_screen.dart - Valida dropdowns
+
+
+📁 ARCHIVOS MODIFICADOS
+========================
+✅ lib/features/sync/data/repositories/sync_repository.dart
+✅ lib/features/gallery/presentation/screens/evidence_detail_screen.dart
+
+
+🧹 ENFOQUE SIMPLIFICADO: RESET EN LUGAR DE MIGRAR
+==================================================
+Como estamos en desarrollo:
+❌ NO necesitamos migraciones complejas
+❌ NO necesitamos scripts de limpieza
+✅ Simplemente RESETEAMOS y empezamos de cero
+
+
+🚀 PROCEDIMIENTO DE RESET COMPLETO
+===================================
+
+1. ESCRITORIO (D:\eduportfolio)
+   rm -rf data/ portfolios/
+   npm start
+
+2. MÓVIL (D:\eduportfolio-mobile)
+   - Desinstalar app del emulador/dispositivo
+   - flutter clean
+   - flutter pub get
+   - flutter run
+
+3. CREAR DATOS DE PRUEBA EN ESCRITORIO
+   - Añadir estudiantes
+   - Añadir evidencias
+   - DESBLOQUEAR BAÚL
+
+4. SINCRONIZAR DESDE MÓVIL
+   - Settings → Sincronización
+   - Conectar con escritorio
+   - Sincronizar
+
+5. VERIFICAR
+   - IDs deben coincidir entre escritorio y móvil
+   - Dropdowns deben funcionar sin errores
+   - Imágenes deben cargarse correctamente
+
+
+📊 ESTADO ACTUAL
+================
+| Componente           | Estado |
+|----------------------|--------|
+| Sync asignaturas     | ✅ Fixed - Usa ID servidor |
+| Sync estudiantes     | ✅ OK |
+| Sync evidencias      | ✅ OK |
+| Sync archivos        | ⚠️ Requiere baúl desbloqueado |
+| Dropdown asignaturas | ✅ Fixed - Validación añadida |
+| Dropdown estudiantes | ✅ Fixed - Validación añadida |
+
+
+🔍 DEBUG
+========
+Móvil:
+  flutter logs | grep -E "(Sync|Subject|ERROR)"
+
+Escritorio:
+  Ver consola de Node.js
+
+SQL (Escritorio):
+  cd D:\eduportfolio\data
+  sqlite3 eduportfolio.db
+  SELECT * FROM subjects ORDER BY id;
+
+
+📄 DOCUMENTACIÓN
+================
+Ver: DESARROLLO_RESET_SIMPLE.md (guía completa de desarrollo)
+
+
+✅ PRÓXIMO PASO
+===============
+Reset completo → Crear datos de prueba → Sincronizar → Verificar
+
+Si algo falla → Reset de nuevo → Probar otra vez
+
+Simple y directo para desarrollo local 🚀
