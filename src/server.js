@@ -662,34 +662,41 @@ app.get('/api/students', (req, res) => {
 });
 
 // 2. Añadir nuevo alumno (o reactivar si ya existía pero estaba inactivo)
-app.post('/api/students', (req, res) => {
+app.post('/api/students', async (req, res) => {
   const { name } = req.body;
   if (!name) {
     res.status(400).json({ error: 'El nombre es requerido' });
     return;
   }
 
-  // Intentar insertar. Si falla por nombre único, intentar reactivar si estaba inactivo.
-  db.run('INSERT INTO students (name) VALUES (?)', [name], function (err) {
-    if (err) {
-      if (err.message.includes('UNIQUE constraint failed')) {
-        // Alumno ya existe, verificar si está inactivo para reactivarlo
-        db.run('UPDATE students SET isActive = 1 WHERE name = ?', [name], function (updateErr) {
-          if (updateErr) {
-            res.status(500).json({ error: updateErr.message });
-          } else if (this.changes > 0) {
-            res.json({ message: 'Alumno reactivado', name });
-          } else {
-            res.status(400).json({ error: 'El alumno ya existe y está activo' });
-          }
-        });
+  try {
+    // Obtener curso activo por defecto
+    const activeCourseId = await getOrCreateActiveCourse();
+
+    // Intentar insertar. Si falla por nombre único, intentar reactivar si estaba inactivo.
+    db.run('INSERT INTO students (name, course_id) VALUES (?, ?)', [name, activeCourseId], function (err) {
+      if (err) {
+        if (err.message.includes('UNIQUE constraint failed')) {
+          // Alumno ya existe, verificar si está inactivo para reactivarlo
+          db.run('UPDATE students SET isActive = 1, course_id = ? WHERE name = ?', [activeCourseId, name], function (updateErr) {
+            if (updateErr) {
+              res.status(500).json({ error: updateErr.message });
+            } else if (this.changes > 0) {
+              res.json({ message: 'Alumno reactivado', name });
+            } else {
+              res.status(400).json({ error: 'El alumno ya existe y está activo' });
+            }
+          });
+          return;
+        }
+        res.status(500).json({ error: err.message });
         return;
       }
-      res.status(500).json({ error: err.message });
-      return;
-    }
-    res.json({ id: this.lastID, name, message: 'Alumno añadido' });
-  });
+      res.json({ id: this.lastID, name, courseId: activeCourseId, message: 'Alumno añadido' });
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Error al obtener curso activo: ' + error.message });
+  }
 });
 
 // 3. Eliminar (inactivar) un alumno
