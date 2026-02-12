@@ -120,6 +120,7 @@ body {
   width: 100%;
   height: 100%;
   object-fit: cover;
+  transform: scaleX(-1); /* Efecto espejo - flip horizontal */
 }
 
 /* Indicador de asignatura */
@@ -1128,6 +1129,7 @@ button:active {
   width: 100%;
   height: 100%;
   object-fit: contain;
+  transform: scaleX(-1); /* Efecto espejo - flip horizontal */
   /* Keeps aspect ratio */
 }
 
