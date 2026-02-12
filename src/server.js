@@ -211,9 +211,17 @@ function initDatabase() {
         ];
 
         const stmt = db.prepare("INSERT INTO subjects (name, icon, color, is_default) VALUES (?, ?, ?, 1)");
-        defaultSubjects.forEach(s => stmt.run(s.name, s.icon, s.color));
+        defaultSubjects.forEach(s => {
+          stmt.run(s.name, s.icon, s.color, (err) => {
+            if (err) {
+              console.error(`❌ Error creando asignatura ${s.name}:`, err.message);
+            } else {
+              console.log(`✅ Asignatura creada: ${s.name}`);
+            }
+          });
+        });
         stmt.finalize(() => {
-          console.log('✅ Asignaturas por defecto creadas');
+          console.log('✅ Proceso de creación de asignaturas por defecto completado');
         });
       } else {
         // Parche para asignar iconos/colores a registros existentes que no los tengan
