@@ -200,8 +200,9 @@ function initDatabase() {
     // === MIGRACIONES DE DATOS ===
 
     // Migración 1: Poblar tabla de asignaturas con valores por defecto
-    db.get("SELECT COUNT(*) as count FROM subjects", (err, row) => {
-      if (!err && row.count === 0) {
+    db.all("SELECT name FROM subjects", (err, existingSubjects) => {
+      if (!err) {
+        const existingNames = existingSubjects.map(s => s.name);
         const defaultSubjects = [
           { name: 'Matemáticas', icon: '🧮', color: '#2196F3' },
           { name: 'Lengua', icon: '📚', color: '#4CAF50' },
@@ -210,20 +211,28 @@ function initDatabase() {
           { name: 'Artística', icon: '🎨', color: '#9C27B0' }
         ];
 
-        const stmt = db.prepare("INSERT INTO subjects (name, icon, color, is_default) VALUES (?, ?, ?, 1)");
-        defaultSubjects.forEach(s => {
-          stmt.run(s.name, s.icon, s.color, (err) => {
-            if (err) {
-              console.error(`❌ Error creando asignatura ${s.name}:`, err.message);
-            } else {
-              console.log(`✅ Asignatura creada: ${s.name}`);
-            }
+        // Solo crear las que faltan
+        const missingSubjects = defaultSubjects.filter(s => !existingNames.includes(s.name));
+
+        if (missingSubjects.length > 0) {
+          const stmt = db.prepare("INSERT INTO subjects (name, icon, color, is_default) VALUES (?, ?, ?, 1)");
+          missingSubjects.forEach(s => {
+            stmt.run(s.name, s.icon, s.color, (err) => {
+              if (err) {
+                console.error(`❌ Error creando asignatura ${s.name}:`, err.message);
+              } else {
+                console.log(`✅ Asignatura creada: ${s.name}`);
+              }
+            });
           });
-        });
-        stmt.finalize(() => {
-          console.log('✅ Proceso de creación de asignaturas por defecto completado');
-        });
-      } else {
+          stmt.finalize(() => {
+            console.log('✅ Proceso de creación de asignaturas por defecto completado');
+          });
+        }
+      }
+
+      // Continuar con el parche de iconos/colores
+      if (!err) {
         // Parche para asignar iconos/colores a registros existentes que no los tengan
         const patches = [
           { name: 'Matemáticas', icon: '🧮', color: '#2196F3' },
@@ -381,24 +390,33 @@ function initDatabase() {
         const hasCreatedAt = columns.some(col => col.name === 'created_at');
         const hasUpdatedAt = columns.some(col => col.name === 'updated_at');
 
+        // Crear created_at primero, luego updated_at secuencialmente
+        const addUpdatedAt = () => {
+          if (!hasUpdatedAt) {
+            db.run("ALTER TABLE students ADD COLUMN updated_at TEXT DEFAULT CURRENT_TIMESTAMP", (err) => {
+              if (!err) {
+                console.log('✅ Columna updated_at añadida a students');
+                // Backfill con created_at (que ya existe) o CURRENT_TIMESTAMP
+                db.run("UPDATE students SET updated_at = COALESCE(created_at, CURRENT_TIMESTAMP) WHERE updated_at IS NULL");
+              }
+            });
+          }
+        };
+
         if (!hasCreatedAt) {
           db.run("ALTER TABLE students ADD COLUMN created_at TEXT DEFAULT CURRENT_TIMESTAMP", (err) => {
             if (!err) {
               console.log('✅ Columna created_at añadida a students');
               // Backfill con enrollmentDate si existe, sino CURRENT_TIMESTAMP
-              db.run("UPDATE students SET created_at = COALESCE(enrollmentDate, CURRENT_TIMESTAMP) WHERE created_at IS NULL");
+              db.run("UPDATE students SET created_at = COALESCE(enrollmentDate, CURRENT_TIMESTAMP) WHERE created_at IS NULL", (err) => {
+                // Después de crear y rellenar created_at, crear updated_at
+                if (!err) addUpdatedAt();
+              });
             }
           });
-        }
-
-        if (!hasUpdatedAt) {
-          db.run("ALTER TABLE students ADD COLUMN updated_at TEXT DEFAULT CURRENT_TIMESTAMP", (err) => {
-            if (!err) {
-              console.log('✅ Columna updated_at añadida a students');
-              // Backfill con created_at o CURRENT_TIMESTAMP
-              db.run("UPDATE students SET updated_at = COALESCE(created_at, CURRENT_TIMESTAMP) WHERE updated_at IS NULL");
-            }
-          });
+        } else {
+          // Si created_at ya existe, crear updated_at directamente
+          addUpdatedAt();
         }
       }
     });
