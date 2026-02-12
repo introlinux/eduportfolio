@@ -1672,6 +1672,12 @@ app.get('/api/sync/metadata', authenticateSyncRequest, (req, res) => {
 
     db.all('SELECT * FROM students', (err, rows) => {
       if (!err) {
+        // DEBUG: Ver datos RAW de la BD antes de mapear
+        console.log('\n🔍 DEBUG - Estudiantes en BD escritorio (RAW):');
+        rows.forEach(s => {
+          console.log(`   ID:${s.id}, name:"${s.name}", course_id:${s.course_id}, isActive:${s.isActive}, created_at:${s.created_at}`);
+        });
+
         // Map desktop column names to mobile format
         metadata.students = rows.map(s => ({
           id: s.id,
@@ -1706,6 +1712,17 @@ app.get('/api/sync/metadata', authenticateSyncRequest, (req, res) => {
           method: e.method
         }));
       }
+
+      // Logs detallados de lo que se envía
+      console.log('\n📤 SYNC METADATA - Enviando al móvil:');
+      console.log(`   📚 Cursos: ${metadata.courses.length}`);
+      console.log(`   📖 Asignaturas: ${metadata.subjects.length}`);
+      console.log(`   👥 Estudiantes: ${metadata.students.length}`);
+      if (metadata.students.length > 0) {
+        console.log('   Nombres:', metadata.students.map(s => `${s.name} (ID:${s.id}, Course:${s.courseId})`).join(', '));
+      }
+      console.log(`   📸 Evidencias: ${metadata.evidences.length}`);
+
       // Enviar respuesta cuando termine la última consulta
       res.json(metadata);
     });
@@ -1716,6 +1733,18 @@ app.get('/api/sync/metadata', authenticateSyncRequest, (req, res) => {
 app.post('/api/sync/push', authenticateSyncRequest, async (req, res) => {
   const { students, subjects, evidences } = req.body;
   const results = { students: 0, subjects: 0, evidences: 0, errors: [] };
+
+  // Logs detallados de lo que se recibe
+  console.log('\n📥 SYNC PUSH - Recibiendo desde móvil:');
+  console.log(`   📖 Asignaturas: ${subjects?.length || 0}`);
+  if (subjects && subjects.length > 0) {
+    console.log('   Nombres:', subjects.map(s => s.name).join(', '));
+  }
+  console.log(`   👥 Estudiantes: ${students?.length || 0}`);
+  if (students && students.length > 0) {
+    console.log('   Nombres:', students.map(s => `${s.name} (mobileID:${s.id})`).join(', '));
+  }
+  console.log(`   📸 Evidencias: ${evidences?.length || 0}`);
 
   try {
     // 1. Preparar infraestructura básica
@@ -1818,9 +1847,9 @@ app.post('/api/sync/push', authenticateSyncRequest, async (req, res) => {
             // Actualizar estudiante existente
             await new Promise((resolve, reject) => {
               db.run(
-                `UPDATE students SET 
-                  course_id = ?, 
-                  isActive = ?, 
+                `UPDATE students SET
+                  course_id = ?,
+                  isActive = ?,
                   face_embeddings_192 = ?
                 WHERE id = ?`,
                 [courseId, s.isActive ? 1 : 0, embeddingsBuffer, existingId],
@@ -1832,6 +1861,7 @@ app.post('/api/sync/push', authenticateSyncRequest, async (req, res) => {
             });
             mobileToDesktopIdMap[s.id] = existingId;
             results.students++;
+            console.log(`✅ Estudiante actualizado: ${s.name} (mobileID:${s.id} -> desktopID:${existingId}, courseID:${courseId})`);
           } else {
             // Crear estudiante nuevo
             const newId = await new Promise((resolve, reject) => {
@@ -1847,11 +1877,13 @@ app.post('/api/sync/push', authenticateSyncRequest, async (req, res) => {
             });
             mobileToDesktopIdMap[s.id] = newId;
             results.students++;
+            console.log(`✅ Estudiante creado: ${s.name} (mobileID:${s.id} -> desktopID:${newId}, courseID:${courseId})`);
           }
         } catch (err) {
           results.errors.push(`Error procesando estudiante ${s.name}: ${err.message}`);
         }
       }
+      console.log('\n📋 Mapa de IDs (mobileID -> desktopID):', mobileToDesktopIdMap);
     }
 
     // 4. Obtener evidencias existentes para evitar duplicados (por file_path)
@@ -1869,10 +1901,12 @@ app.post('/api/sync/push', authenticateSyncRequest, async (req, res) => {
           // Traducir student_id usando nuestro mapa
           const desktopStudentId = mobileToDesktopIdMap[e.studentId] || e.studentId;
 
+          console.log(`   📸 Evidencia: ${e.filePath} -> studentID móvil:${e.studentId} -> studentID escritorio:${desktopStudentId}, subjectID:${e.subjectId}`);
+
           await new Promise((resolve, reject) => {
             db.run(
               `INSERT INTO evidences (
-                student_id, course_id, subject_id, type, file_path, 
+                student_id, course_id, subject_id, type, file_path,
                 capture_date, confidence, method, is_reviewed, file_size
               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
               [
