@@ -367,6 +367,34 @@ function initDatabase() {
       }
     });
 
+    // Migración 6: Añadir columnas de timestamp a students (unificación con móvil)
+    db.all("PRAGMA table_info(students)", (err, columns) => {
+      if (!err) {
+        const hasCreatedAt = columns.some(col => col.name === 'created_at');
+        const hasUpdatedAt = columns.some(col => col.name === 'updated_at');
+
+        if (!hasCreatedAt) {
+          db.run("ALTER TABLE students ADD COLUMN created_at TEXT DEFAULT CURRENT_TIMESTAMP", (err) => {
+            if (!err) {
+              console.log('✅ Columna created_at añadida a students');
+              // Backfill con enrollmentDate si existe, sino CURRENT_TIMESTAMP
+              db.run("UPDATE students SET created_at = COALESCE(enrollmentDate, CURRENT_TIMESTAMP) WHERE created_at IS NULL");
+            }
+          });
+        }
+
+        if (!hasUpdatedAt) {
+          db.run("ALTER TABLE students ADD COLUMN updated_at TEXT DEFAULT CURRENT_TIMESTAMP", (err) => {
+            if (!err) {
+              console.log('✅ Columna updated_at añadida a students');
+              // Backfill con created_at o CURRENT_TIMESTAMP
+              db.run("UPDATE students SET updated_at = COALESCE(created_at, CURRENT_TIMESTAMP) WHERE updated_at IS NULL");
+            }
+          });
+        }
+      }
+    });
+
     console.log('📊 Tablas de base de datos inicializadas y migradas');
   });
 }
