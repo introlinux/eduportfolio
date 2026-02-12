@@ -186,6 +186,12 @@ function initDatabase() {
       )
     `);
 
+    // Crear índice UNIQUE en file_path para prevenir duplicados
+    db.run(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_evidences_file_path_unique
+      ON evidences(file_path)
+    `);
+
     // === TABLA DE SESIONES (sin cambios) ===
     db.run(`
       CREATE TABLE IF NOT EXISTS sessions (
@@ -417,6 +423,38 @@ function initDatabase() {
         } else {
           // Si created_at ya existe, crear updated_at directamente
           addUpdatedAt();
+        }
+      }
+    });
+
+    // Migración 7: Crear índice UNIQUE en file_path de evidences para evitar duplicados
+    db.all("PRAGMA index_list(evidences)", (err, indexes) => {
+      if (!err) {
+        const hasUniqueIndex = indexes && indexes.some(idx => idx.name === 'idx_evidences_file_path_unique');
+        if (!hasUniqueIndex) {
+          // Primero, eliminar duplicados existentes (si los hay)
+          db.run(`
+            DELETE FROM evidences
+            WHERE rowid NOT IN (
+              SELECT MIN(rowid)
+              FROM evidences
+              GROUP BY file_path
+            )
+          `, (err) => {
+            if (!err) {
+              console.log('✅ Duplicados eliminados de evidences');
+              // Ahora crear el índice UNIQUE
+              db.run("CREATE UNIQUE INDEX IF NOT EXISTS idx_evidences_file_path_unique ON evidences(file_path)", (err) => {
+                if (!err) {
+                  console.log('✅ Índice UNIQUE creado en evidences.file_path para prevenir duplicados');
+                } else {
+                  console.error('❌ Error creando índice UNIQUE en evidences:', err);
+                }
+              });
+            } else {
+              console.error('❌ Error eliminando duplicados de evidences:', err);
+            }
+          });
         }
       }
     });
@@ -1671,6 +1709,8 @@ async function authenticateSyncRequest(req, res, next) {
 
 // 1. Obtener metadatos completos (PULL desde móvil)
 app.get('/api/sync/metadata', authenticateSyncRequest, (req, res) => {
+  console.log('\n🔵 [SYNC-OUT] Solicitud de metadatos recibida');
+
   const metadata = {
     students: [],
     courses: [],
@@ -1689,6 +1729,7 @@ app.get('/api/sync/metadata', authenticateSyncRequest, (req, res) => {
           is_active: c.is_active,
           created_at: c.created_at
         }));
+        console.log(`   📦 Cursos encontrados: ${metadata.courses.length}`);
       }
     });
 
@@ -1700,17 +1741,12 @@ app.get('/api/sync/metadata', authenticateSyncRequest, (req, res) => {
           is_default: s.is_default,
           created_at: s.created_at
         }));
+        console.log(`   📚 Asignaturas encontradas: ${metadata.subjects.length}`);
       }
     });
 
     db.all('SELECT * FROM students', (err, rows) => {
       if (!err) {
-        // DEBUG: Ver datos RAW de la BD antes de mapear
-        console.log('\n🔍 DEBUG - Estudiantes en BD escritorio (RAW):');
-        rows.forEach(s => {
-          console.log(`   ID:${s.id}, name:"${s.name}", course_id:${s.course_id}, isActive:${s.isActive}, created_at:${s.created_at}`);
-        });
-
         // Map desktop column names to mobile format
         metadata.students = rows.map(s => ({
           id: s.id,
@@ -1721,6 +1757,10 @@ app.get('/api/sync/metadata', authenticateSyncRequest, (req, res) => {
           createdAt: s.created_at || s.enrollmentDate || new Date().toISOString(),
           updatedAt: s.updated_at || s.created_at || new Date().toISOString()
         }));
+        console.log(`   👥 Estudiantes encontrados: ${metadata.students.length}`);
+        if (metadata.students.length > 0) {
+          console.log(`      IDs: ${metadata.students.map(s => s.id).join(', ')}`);
+        }
       }
     });
 
@@ -1744,17 +1784,12 @@ app.get('/api/sync/metadata', authenticateSyncRequest, (req, res) => {
           confidence: e.confidence,
           method: e.method
         }));
+        console.log(`   📸 Evidencias encontradas: ${metadata.evidences.length}`);
       }
 
       // Logs detallados de lo que se envía
-      console.log('\n📤 SYNC METADATA - Enviando al móvil:');
-      console.log(`   📚 Cursos: ${metadata.courses.length}`);
-      console.log(`   📖 Asignaturas: ${metadata.subjects.length}`);
-      console.log(`   👥 Estudiantes: ${metadata.students.length}`);
-      if (metadata.students.length > 0) {
-        console.log('   Nombres:', metadata.students.map(s => `${s.name} (ID:${s.id}, Course:${s.courseId})`).join(', '));
-      }
-      console.log(`   📸 Evidencias: ${metadata.evidences.length}`);
+      console.log('📤 [SYNC-OUT] Enviando respuesta de metadatos completa');
+      console.log('---------------------------------------------------');
 
       // Enviar respuesta cuando termine la última consulta
       res.json(metadata);
@@ -1768,20 +1803,28 @@ app.post('/api/sync/push', authenticateSyncRequest, async (req, res) => {
   const results = { students: 0, subjects: 0, evidences: 0, errors: [] };
 
   // Logs detallados de lo que se recibe
-  console.log('\n📥 SYNC PUSH - Recibiendo desde móvil:');
+  console.log('\n🟢 [SYNC-IN] Datos recibidos desde móvil:');
+  console.log('---------------------------------------------------');
   console.log(`   📖 Asignaturas: ${subjects?.length || 0}`);
   if (subjects && subjects.length > 0) {
-    console.log('   Nombres:', subjects.map(s => s.name).join(', '));
+    console.log('      Nombres:', subjects.map(s => s.name).join(', '));
   }
   console.log(`   👥 Estudiantes: ${students?.length || 0}`);
   if (students && students.length > 0) {
-    console.log('   Nombres:', students.map(s => `${s.name} (mobileID:${s.id})`).join(', '));
+    console.log('      Detalles:', students.map(s => `${s.name} (ID Móvil:${s.id}, Curso:${s.courseId})`).join(' | '));
   }
   console.log(`   📸 Evidencias: ${evidences?.length || 0}`);
+  if (evidences && evidences.length > 0) {
+    // Loggear una muestra de evidencias si son muchas
+    const sample = evidences.slice(0, 3).map(e => path.basename(e.filePath)).join(', ');
+    console.log(`      Ejemplos: ${sample}${evidences.length > 3 ? '...' : ''}`);
+  }
 
   try {
     // 1. Preparar infraestructura básica
     const activeCourseId = await getOrCreateActiveCourse();
+    console.log(`   🎓 Curso activo detectado: ID ${activeCourseId}`);
+
     const validCourseIds = await new Promise((resolve) => {
       db.all('SELECT id FROM courses', (err, rows) => resolve((rows || []).map(r => r.id)));
     });
@@ -1802,31 +1845,27 @@ app.post('/api/sync/push', authenticateSyncRequest, async (req, res) => {
 
     // 2.5. Procesar Asignaturas (subjects) del móvil
     if (subjects && subjects.length > 0) {
+      console.log('   🔄 Procesando Asignaturas...');
       for (const subj of subjects) {
         try {
-          // Verificar si la asignatura ya existe por nombre
+          // Verificar si la asignatura ya existe por nombre o por ID
           const existing = await new Promise((resolve) => {
-            db.get('SELECT id FROM subjects WHERE name = ?', [subj.name], (err, row) => {
-              resolve(row);
-            });
+            db.get(
+              'SELECT id, name, color, icon FROM subjects WHERE name = ? OR id = ?',
+              [subj.name, subj.id],
+              (err, row) => {
+                resolve(row);
+              }
+            );
           });
 
           if (existing) {
-            // Actualizar asignatura existente
-            await new Promise((resolve, reject) => {
-              db.run(
-                `UPDATE subjects SET color = ?, icon = ?, is_default = ? WHERE id = ?`,
-                [subj.color || null, subj.icon || null, subj.isDefault ? 1 : 0, existing.id],
-                (err) => {
-                  if (err) reject(err);
-                  else resolve();
-                }
-              );
-            });
-            results.subjects++;
-            console.log(`✅ Asignatura actualizada: ${subj.name}`);
+            // ✅ FIX: NO actualizar asignaturas existentes
+            // Las asignaturas son datos maestros del escritorio
+            // El móvil solo las recibe, no las modifica
+            console.log(`      ⏭️ YA EXISTE (sin cambios): ${subj.name} (ID: ${existing.id})`);
           } else {
-            // Crear nueva asignatura
+            // Crear nueva asignatura (solo si realmente no existe)
             await new Promise((resolve, reject) => {
               db.run(
                 `INSERT INTO subjects (name, color, icon, is_default, created_at) VALUES (?, ?, ?, ?, ?)`,
@@ -1844,10 +1883,10 @@ app.post('/api/sync/push', authenticateSyncRequest, async (req, res) => {
               );
             });
             results.subjects++;
-            console.log(`✅ Asignatura creada: ${subj.name}`);
+            console.log(`      ➕ CREADA: ${subj.name}`);
           }
         } catch (err) {
-          console.error(`Error procesando asignatura ${subj.name}:`, err);
+          console.error(`      ❌ Error procesando asignatura ${subj.name}:`, err);
           results.errors.push(`Subject ${subj.name}: ${err.message}`);
         }
       }
@@ -1855,11 +1894,13 @@ app.post('/api/sync/push', authenticateSyncRequest, async (req, res) => {
 
     // 3. Procesar Estudiantes (Uno a uno para gestionar el mapeo de IDs correctamente)
     if (students && students.length > 0) {
+      console.log('   🔄 Procesando Estudiantes...');
       for (const s of students) {
         try {
           let courseId = s.courseId;
           if (!courseId || courseId === 0 || !validCourseIds.includes(courseId)) {
             courseId = activeCourseId;
+            console.log(`      ⚠️ Reasignando curso para ${s.name}: ${s.courseId} -> ${activeCourseId}`);
           }
 
           let embeddingsBuffer = null;
@@ -1894,7 +1935,7 @@ app.post('/api/sync/push', authenticateSyncRequest, async (req, res) => {
             });
             mobileToDesktopIdMap[s.id] = existingId;
             results.students++;
-            console.log(`✅ Estudiante actualizado: ${s.name} (mobileID:${s.id} -> desktopID:${existingId}, courseID:${courseId})`);
+            console.log(`      ✏️ ACTUALIZADO: ${s.name} (Móvil:${s.id} -> Escritorio:${existingId})`);
           } else {
             // Crear estudiante nuevo
             const newId = await new Promise((resolve, reject) => {
@@ -1910,58 +1951,124 @@ app.post('/api/sync/push', authenticateSyncRequest, async (req, res) => {
             });
             mobileToDesktopIdMap[s.id] = newId;
             results.students++;
-            console.log(`✅ Estudiante creado: ${s.name} (mobileID:${s.id} -> desktopID:${newId}, courseID:${courseId})`);
+            console.log(`      ➕ CREADO: ${s.name} (Móvil:${s.id} -> Escritorio:${newId})`);
           }
         } catch (err) {
+          console.error(`      ❌ Error estudiante ${s.name}: ${err.message}`);
           results.errors.push(`Error procesando estudiante ${s.name}: ${err.message}`);
         }
       }
-      console.log('\n📋 Mapa de IDs (mobileID -> desktopID):', mobileToDesktopIdMap);
+      console.log('      📋 Mapa de IDs generado:', JSON.stringify(mobileToDesktopIdMap));
     }
 
-    // 4. Obtener evidencias existentes para evitar duplicados (por file_path)
+    // 4. Obtener evidencias existentes para evitar duplicados (por ID y file_path)
     const existingEvidences = await new Promise((resolve) => {
-      db.all('SELECT file_path FROM evidences', (err, rows) => resolve(new Set((rows || []).map(r => r.file_path))));
+      db.all('SELECT id, file_path FROM evidences', (err, rows) => {
+        // Crear dos mapas: por ID y por filename normalizado
+        const byId = new Map();
+        const byFilename = new Map();
+
+        (rows || []).forEach(r => {
+          if (r.id) {
+            byId.set(r.id, r);
+          }
+          const filename = r.file_path.split('/').pop().replace(/\.enc$/i, '');
+          byFilename.set(filename, r);
+        });
+
+        resolve({ byId, byFilename });
+      });
     });
 
     // 5. Procesar Evidencias
     if (evidences && evidences.length > 0) {
+      console.log('   🔄 Procesando Evidencias...');
       for (const e of evidences) {
         try {
-          // Si ya existe la ruta, ignorar para no duplicar
-          if (existingEvidences.has(e.filePath)) continue;
+          // Normalizar el filename para comparación
+          const incomingFilename = e.filePath.split('/').pop().replace(/\.enc$/i, '');
 
+          // ✅ FIX: Verificar duplicados por ID (primario) y por filename (fallback)
+          const existsById = e.id && existingEvidences.byId.has(e.id);
+          const existsByFilename = existingEvidences.byFilename.has(incomingFilename);
+
+          if (existsById || existsByFilename) {
+            // Ya existe, actualizar en vez de insertar
+            const existing = existsById
+              ? existingEvidences.byId.get(e.id)
+              : existingEvidences.byFilename.get(incomingFilename);
+
+            // Traducir student_id usando nuestro mapa
+            const desktopStudentId = mobileToDesktopIdMap[e.studentId] || e.studentId;
+
+            await new Promise((resolve, reject) => {
+              db.run(
+                `UPDATE evidences SET
+                  student_id = ?, course_id = ?, subject_id = ?, type = ?,
+                  file_path = ?, capture_date = ?, confidence = ?, method = ?,
+                  is_reviewed = ?, file_size = ?
+                WHERE id = ?`,
+                [
+                  desktopStudentId, e.courseId, e.subjectId, e.type, e.filePath,
+                  e.captureDate, e.confidence, e.method, e.isReviewed ? 1 : 0,
+                  e.fileSize, existing.id
+                ],
+                (err) => {
+                  if (err) reject(err);
+                  else resolve();
+                }
+              );
+            });
+            console.log(`      ✏️ ACTUALIZADA: ${incomingFilename} (ID: ${existing.id})`);
+            continue;
+          }
+
+          // Nueva evidencia - insertar
           // Traducir student_id usando nuestro mapa
           const desktopStudentId = mobileToDesktopIdMap[e.studentId] || e.studentId;
 
-          console.log(`   📸 Evidencia: ${e.filePath} -> studentID móvil:${e.studentId} -> studentID escritorio:${desktopStudentId}, subjectID:${e.subjectId}`);
-
-          await new Promise((resolve, reject) => {
-            db.run(
-              `INSERT INTO evidences (
+          // ✅ FIX: Incluir ID si viene del móvil (para mantener consistencia)
+          const hasId = e.id && e.id > 0;
+          const sql = hasId
+            ? `INSERT OR REPLACE INTO evidences (
+                id, student_id, course_id, subject_id, type, file_path,
+                capture_date, confidence, method, is_reviewed, file_size
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            : `INSERT INTO evidences (
                 student_id, course_id, subject_id, type, file_path,
                 capture_date, confidence, method, is_reviewed, file_size
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-              [
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+
+          const params = hasId
+            ? [
+                e.id, desktopStudentId, e.courseId, e.subjectId, e.type, e.filePath,
+                e.captureDate, e.confidence, e.method, e.isReviewed ? 1 : 0, e.fileSize
+              ]
+            : [
                 desktopStudentId, e.courseId, e.subjectId, e.type, e.filePath,
                 e.captureDate, e.confidence, e.method, e.isReviewed ? 1 : 0, e.fileSize
-              ],
-              (err) => {
-                if (err) reject(err);
-                else resolve();
-              }
-            );
+              ];
+
+          await new Promise((resolve, reject) => {
+            db.run(sql, params, (err) => {
+              if (err) reject(err);
+              else resolve();
+            });
           });
           results.evidences++;
+          console.log(`      ➕ INSERTADA: ${incomingFilename} (ID: ${e.id || 'auto'}, Estudiante: ${desktopStudentId})`);
         } catch (err) {
+          console.error(`      ❌ Error evidencia ${e.filePath}: ${err.message}`);
           results.errors.push(`Error sincronizando evidencia ${e.filePath}: ${err.message}`);
         }
       }
+      console.log(`      ✅ Total evidencias procesadas: ${results.evidences}`);
     }
 
+    console.log('✅ [SYNC-IN] Proceso completado.');
     res.json({ success: true, results });
   } catch (error) {
-    console.error('❌ Error en sincronización:', error);
+    console.error('❌ [SYNC-IN] Error FATAL en sincronización:', error);
     results.errors.push(`Error general de sincronización: ${error.message}`);
     res.status(500).json({ success: false, results });
   }
@@ -1971,10 +2078,12 @@ app.post('/api/sync/push', authenticateSyncRequest, async (req, res) => {
 app.post('/api/sync/files', authenticateSyncRequest, upload.single('file'), async (req, res) => {
   try {
     if (!req.file) {
+      console.warn('⚠️ [SYNC-UPLOAD] No se recibió archivo');
       return res.status(400).json({ error: 'No file uploaded' });
     }
 
     const filename = req.file.originalname;
+    console.log(`📥 [SYNC-UPLOAD] Recibiendo archivo: ${filename} (${req.file.size} bytes)`);
 
     // Usar contraseña del request (autenticado por middleware)
     const password = req.syncPassword;
@@ -1995,14 +2104,14 @@ app.post('/api/sync/files', authenticateSyncRequest, upload.single('file'), asyn
       const cryptoManager = require('./crypto-manager');
       await cryptoManager.encryptFile(filepath, password);
       finalFilename = filename + cryptoManager.ENCRYPTED_EXTENSION;
-      console.log(`✅ Archivo sincronizado y encriptado: ${filename}`);
+      console.log(`   🔒 Archivo encriptado localmente como: ${finalFilename}`);
     } catch (encryptError) {
-      console.error('⚠️  Error encriptando archivo sincronizado:', encryptError.message);
+      console.error('   ⚠️  Error encriptando archivo sincronizado:', encryptError.message);
     }
 
     res.json({ success: true, filename: finalFilename });
   } catch (error) {
-    console.error('❌ Error guardando archivo:', error);
+    console.error('❌ [SYNC-UPLOAD] Error guardando archivo:', error);
     res.status(500).json({ error: 'Error saving file' });
   }
 });
@@ -2065,11 +2174,11 @@ app.get('/api/sync/files/:filename', authenticateSyncRequest, async (req, res) =
       res.set('Cache-Control', 'no-cache'); // No cachear en el móvil
       res.send(fileBuffer);
 
-      console.log(`✅ Archivo servido (desencriptado): ${filename} (${fileBuffer.length} bytes)`);
+      console.log(`   ✅ Archivo servido (desencriptado): ${filename} (${fileBuffer.length} bytes)`);
     }
     // Si existe sin encriptar, servirlo directamente
     else if (fs.existsSync(filepath)) {
-      console.log(`📤 Sirviendo archivo sin encriptar: ${filename}`);
+      console.log(`   📤 [SYNC-DOWNLOAD] Sirviendo archivo sin encriptar: ${filename}`);
       res.set('Content-Type', mimeType);
       res.sendFile(filepath);
     }
