@@ -1647,19 +1647,65 @@ app.get('/api/sync/metadata', authenticateSyncRequest, (req, res) => {
 
   db.serialize(() => {
     db.all('SELECT * FROM courses', (err, rows) => {
-      if (!err) metadata.courses = rows;
+      if (!err) {
+        // Map desktop column names to mobile format
+        metadata.courses = rows.map(c => ({
+          ...c,
+          start_date: c.start_date,
+          end_date: c.end_date,
+          is_active: c.is_active,
+          created_at: c.created_at
+        }));
+      }
     });
 
     db.all('SELECT * FROM subjects', (err, rows) => {
-      if (!err) metadata.subjects = rows;
+      if (!err) {
+        // Map desktop column names to mobile format
+        metadata.subjects = rows.map(s => ({
+          ...s,
+          is_default: s.is_default,
+          created_at: s.created_at
+        }));
+      }
     });
 
     db.all('SELECT * FROM students', (err, rows) => {
-      if (!err) metadata.students = rows;
+      if (!err) {
+        // Map desktop column names to mobile format
+        metadata.students = rows.map(s => ({
+          id: s.id,
+          courseId: s.course_id,
+          name: s.name,
+          faceEmbeddings192: s.face_embeddings_192,
+          isActive: s.isActive !== undefined ? s.isActive : 1,
+          createdAt: s.created_at || s.enrollmentDate || new Date().toISOString(),
+          updatedAt: s.updated_at || s.created_at || new Date().toISOString()
+        }));
+      }
     });
 
     db.all('SELECT * FROM evidences', (err, rows) => {
-      if (!err) metadata.evidences = rows;
+      if (!err) {
+        // Map desktop column names to mobile format
+        metadata.evidences = rows.map(e => ({
+          id: e.id,
+          studentId: e.student_id,
+          courseId: e.course_id,
+          subjectId: e.subject_id,
+          type: e.type,
+          filePath: e.file_path,
+          thumbnailPath: e.thumbnail_path,
+          fileSize: e.file_size,
+          duration: e.duration,
+          captureDate: e.capture_date,
+          isReviewed: e.is_reviewed,
+          notes: e.notes,
+          createdAt: e.created_at,
+          confidence: e.confidence,
+          method: e.method
+        }));
+      }
       // Enviar respuesta cuando termine la última consulta
       res.json(metadata);
     });
@@ -1668,8 +1714,8 @@ app.get('/api/sync/metadata', authenticateSyncRequest, (req, res) => {
 
 // 2. Recibir datos nuevos (PUSH desde móvil)
 app.post('/api/sync/push', authenticateSyncRequest, async (req, res) => {
-  const { students, evidences } = req.body;
-  const results = { students: 0, evidences: 0, errors: [] };
+  const { students, subjects, evidences } = req.body;
+  const results = { students: 0, subjects: 0, evidences: 0, errors: [] };
 
   try {
     // 1. Preparar infraestructura básica
@@ -1691,6 +1737,59 @@ app.post('/api/sync/push', authenticateSyncRequest, async (req, res) => {
 
     // Mapa de mobileId -> desktopId (para ligar evidencias luego)
     const mobileToDesktopIdMap = {};
+
+    // 2.5. Procesar Asignaturas (subjects) del móvil
+    if (subjects && subjects.length > 0) {
+      for (const subj of subjects) {
+        try {
+          // Verificar si la asignatura ya existe por nombre
+          const existing = await new Promise((resolve) => {
+            db.get('SELECT id FROM subjects WHERE name = ?', [subj.name], (err, row) => {
+              resolve(row);
+            });
+          });
+
+          if (existing) {
+            // Actualizar asignatura existente
+            await new Promise((resolve, reject) => {
+              db.run(
+                `UPDATE subjects SET color = ?, icon = ?, is_default = ? WHERE id = ?`,
+                [subj.color || null, subj.icon || null, subj.isDefault ? 1 : 0, existing.id],
+                (err) => {
+                  if (err) reject(err);
+                  else resolve();
+                }
+              );
+            });
+            results.subjects++;
+            console.log(`✅ Asignatura actualizada: ${subj.name}`);
+          } else {
+            // Crear nueva asignatura
+            await new Promise((resolve, reject) => {
+              db.run(
+                `INSERT INTO subjects (name, color, icon, is_default, created_at) VALUES (?, ?, ?, ?, ?)`,
+                [
+                  subj.name,
+                  subj.color || null,
+                  subj.icon || null,
+                  subj.isDefault ? 1 : 0,
+                  subj.createdAt || new Date().toISOString()
+                ],
+                (err) => {
+                  if (err) reject(err);
+                  else resolve();
+                }
+              );
+            });
+            results.subjects++;
+            console.log(`✅ Asignatura creada: ${subj.name}`);
+          }
+        } catch (err) {
+          console.error(`Error procesando asignatura ${subj.name}:`, err);
+          results.errors.push(`Subject ${subj.name}: ${err.message}`);
+        }
+      }
+    }
 
     // 3. Procesar Estudiantes (Uno a uno para gestionar el mapeo de IDs correctamente)
     if (students && students.length > 0) {
