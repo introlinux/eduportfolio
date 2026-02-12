@@ -227,8 +227,11 @@ GET /api/vault/stats  # Ver estadísticas
 - **CÁMBIALA** en producción: Panel del Docente → Seguridad
 
 ### ⚠️ IMPORTANTE: Sincronización Móvil
-- El servidor debe estar **autenticado** para aceptar archivos del móvil
-- Los archivos sincronizados se encriptan automáticamente
+- **ACTUALIZACIÓN 2026-02-11:** Sistema de autenticación implementado
+- Ver `SYNC_SECURITY_UPDATE.md` para detalles completos
+- Ahora se requiere contraseña para sincronizar
+- Los archivos se desencriptan on-demand para el móvil
+- Contraseña almacenada de forma segura en el móvil
 
 ### ⚠️ IMPORTANTE: Backup
 - Haz backup de:

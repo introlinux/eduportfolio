@@ -960,6 +960,7 @@ async function loadStudents() {
     if (gallerySelect) {
       const savedValue = gallerySelect.value;
       gallerySelect.innerHTML = '<option value="">Todos los estudiantes</option>' +
+        '<option value="unassigned">Sin asignar</option>' +
         students.map(s => `<option value="${s.id}">${s.name}</option>`).join('');
       if (savedValue) gallerySelect.value = savedValue;
     }
@@ -1439,6 +1440,11 @@ async function updateGallery() {
     if (!studentId || studentId === 'Todos') {
       const response = await fetch(`${API_URL}/captures`);
       captures = await response.json();
+    } else if (studentId === 'unassigned') {
+      // Cargar evidencias sin estudiante asignado
+      const response = await fetch(`${API_URL}/captures`);
+      const allCaptures = await response.json();
+      captures = allCaptures.filter(c => !c.student_id || c.student_id === null);
     } else {
       // Cargar solo de un alumno
       const response = await fetch(`${API_URL}/captures/${studentId}`);
@@ -1467,7 +1473,7 @@ async function updateGallery() {
     // Si estamos viendo un solo alumno, obtenemos su nombre una vez.
     // Si estamos viendo todos, usamos el nombre que viene en cada captura.
     let singleStudentName = 'Estudiante';
-    if (studentId && studentId !== 'Todos') {
+    if (studentId && studentId !== 'Todos' && studentId !== 'unassigned') {
       const studentResponse = await fetch(`${API_URL}/students`);
       const students = studentResponse.ok ? await studentResponse.json() : [];
       const selectedStudent = students.find(s => s.id === parseInt(studentId));
@@ -1478,7 +1484,7 @@ async function updateGallery() {
       const card = document.createElement('div');
       card.className = 'gallery-card';
       const imgUrl = `/portfolios/${cap.imagePath}`;
-      const studentNameDisplay = cap.studentName || singleStudentName;
+      const studentNameDisplay = cap.studentName || (studentId && studentId !== 'Todos' ? singleStudentName : 'Sin asignar');
 
       card.innerHTML = `
         <img src="${imgUrl}" alt="Trabajo">
@@ -1854,10 +1860,23 @@ async function deleteCourse(id, name) {
 
 function openCourseModal() {
   document.getElementById('courseModal').style.display = 'flex';
-  // Prellenar con año sugerido
-  const year = new Date().getFullYear();
-  document.getElementById('courseName').value = `Curso ${year}-${year + 1}`;
-  document.getElementById('courseStartDate').valueAsDate = new Date();
+
+  // Prellenar con año sugerido según calendario español
+  const now = new Date();
+  const currentYear = now.getFullYear();
+  const nextYear = currentYear + 1;
+
+  // Si estamos después de septiembre, sugerir curso actual-siguiente
+  // Si estamos antes, sugerir curso anterior-actual
+  let suggestedCourse;
+  if (now.getMonth() >= 8) { // Septiembre (mes 8) a diciembre
+    suggestedCourse = `Curso ${currentYear}-${nextYear.toString().substring(2)}`;
+  } else { // Enero a agosto
+    suggestedCourse = `Curso ${currentYear - 1}-${currentYear.toString().substring(2)}`;
+  }
+
+  document.getElementById('courseName').value = suggestedCourse;
+  document.getElementById('courseStartDate').valueAsDate = now;
 }
 
 function closeCourseModal() {

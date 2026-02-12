@@ -68,8 +68,8 @@ app.use('/_temporal_', express.static(path.join(PORTFOLIOS_DIR, '_temporal_')));
 // === MIDDLEWARE DE DESENCRIPTACIÓN ON-DEMAND ===
 // Intercepta solicitudes de imágenes en /portfolios y las desencripta en memoria
 app.use('/portfolios', async (req, res, next) => {
-  // Solo procesar archivos de imagen
-  const isImage = /\.(jpg|jpeg|png)$/i.test(req.path);
+  // Solo procesar archivos de imagen (incluyendo archivos .enc)
+  const isImage = /\.(jpg|jpeg|png|webp|gif)(\.enc)?$/i.test(req.path);
   if (!isImage) {
     return next(); // Dejar pasar otros archivos
   }
@@ -80,15 +80,19 @@ app.use('/portfolios', async (req, res, next) => {
   }
 
   try {
-    // Construir ruta absoluta del archivo
-    const filePath = path.join(PORTFOLIOS_DIR, req.path);
+    // Construir ruta absoluta del archivo (sin .enc si lo tiene)
+    const cleanPath = req.path.replace(/\.enc$/i, '');
+    const filePath = path.join(PORTFOLIOS_DIR, cleanPath);
 
     // Obtener imagen desencriptada del cache (o desencriptarla si no está)
     const imageBuffer = await decryptionCache.get(filePath, currentPassword);
 
-    // Determinar tipo MIME
-    const ext = path.extname(req.path).toLowerCase();
-    const mimeType = ext === '.png' ? 'image/png' : 'image/jpeg';
+    // Determinar tipo MIME basado en la extensión original (sin .enc)
+    const ext = path.extname(cleanPath).toLowerCase();
+    let mimeType = 'image/jpeg'; // Default
+    if (ext === '.png') mimeType = 'image/png';
+    else if (ext === '.webp') mimeType = 'image/webp';
+    else if (ext === '.gif') mimeType = 'image/gif';
 
     // Servir imagen desde memoria
     res.set('Content-Type', mimeType);
@@ -233,10 +237,16 @@ function initDatabase() {
     // Migración 2: Crear curso por defecto si no existe
     db.get("SELECT COUNT(*) as count FROM courses", (err, row) => {
       if (!err && row.count === 0) {
-        const currentYear = new Date().getFullYear();
+        const now = new Date();
+        const currentYear = now.getFullYear();
+        const nextYear = currentYear + 1;
+        // Formato corto según calendario español
+        const courseName = now.getMonth() >= 8
+          ? `Curso ${currentYear}-${nextYear.toString().substring(2)}`
+          : `Curso ${currentYear - 1}-${currentYear.toString().substring(2)}`;
         db.run(
           "INSERT INTO courses (name, start_date, is_active) VALUES (?, ?, 1)",
-          [`Curso ${currentYear}-${currentYear + 1}`, new Date().toISOString()],
+          [courseName, now.toISOString()],
           function (err) {
             if (!err) {
               console.log('✅ Curso por defecto creado');
@@ -1527,9 +1537,14 @@ function getOrCreateActiveCourse() {
       }
 
       // No hay curso activo, crear uno por defecto
-      const currentYear = new Date().getFullYear();
-      const courseName = `Curso ${currentYear}-${currentYear + 1}`;
-      const startDate = new Date().toISOString();
+      const now = new Date();
+      const currentYear = now.getFullYear();
+      const nextYear = currentYear + 1;
+      // Formato corto según calendario español
+      const courseName = now.getMonth() >= 8
+        ? `Curso ${currentYear}-${nextYear.toString().substring(2)}`
+        : `Curso ${currentYear - 1}-${currentYear.toString().substring(2)}`;
+      const startDate = now.toISOString();
 
       db.run(
         'INSERT INTO courses (name, start_date, is_active) VALUES (?, ?, 1)',
@@ -1546,9 +1561,55 @@ function getOrCreateActiveCourse() {
   });
 }
 
+// === MIDDLEWARE DE AUTENTICACIÓN PARA SINCRONIZACIÓN ===
+// Protege los endpoints de sincronización con contraseña
+async function authenticateSyncRequest(req, res, next) {
+  try {
+    // Extraer contraseña del header Authorization
+    // Formato esperado: "Authorization: Bearer {password}"
+    const authHeader = req.headers.authorization;
+
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({
+        error: 'Autenticación requerida',
+        message: 'Debes proporcionar la contraseña del servidor en el header Authorization'
+      });
+    }
+
+    const password = authHeader.substring(7); // Remover "Bearer "
+
+    if (!password) {
+      return res.status(401).json({
+        error: 'Contraseña vacía',
+        message: 'La contraseña no puede estar vacía'
+      });
+    }
+
+    // Verificar contraseña usando passwordManager
+    const isValid = await passwordManager.verifyPassword(password);
+
+    if (!isValid) {
+      return res.status(403).json({
+        error: 'Contraseña incorrecta',
+        message: 'La contraseña proporcionada no es correcta'
+      });
+    }
+
+    // Guardar la contraseña en el request para usarla en desencriptación
+    req.syncPassword = password;
+
+    next();
+  } catch (error) {
+    console.error('❌ Error en autenticación de sync:', error);
+    res.status(500).json({
+      error: 'Error de autenticación',
+      message: error.message
+    });
+  }
+}
 
 // 1. Obtener metadatos completos (PULL desde móvil)
-app.get('/api/sync/metadata', (req, res) => {
+app.get('/api/sync/metadata', authenticateSyncRequest, (req, res) => {
   const metadata = {
     students: [],
     courses: [],
@@ -1578,7 +1639,7 @@ app.get('/api/sync/metadata', (req, res) => {
 });
 
 // 2. Recibir datos nuevos (PUSH desde móvil)
-app.post('/api/sync/push', async (req, res) => {
+app.post('/api/sync/push', authenticateSyncRequest, async (req, res) => {
   const { students, evidences } = req.body;
   const results = { students: 0, evidences: 0, errors: [] };
 
@@ -1713,7 +1774,7 @@ app.post('/api/sync/push', async (req, res) => {
 });
 
 // 3. Subir archivo de evidencia (desde móvil)
-app.post('/api/sync/files', upload.single('file'), async (req, res) => {
+app.post('/api/sync/files', authenticateSyncRequest, upload.single('file'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No file uploaded' });
@@ -1721,12 +1782,8 @@ app.post('/api/sync/files', upload.single('file'), async (req, res) => {
 
     const filename = req.file.originalname;
 
-    // Verificar autenticación
-    if (!isAuthenticated || !currentPassword) {
-      return res.status(401).json({
-        error: 'Servidor no autenticado. Inicia sesión en la aplicación de escritorio primero.'
-      });
-    }
+    // Usar contraseña del request (autenticado por middleware)
+    const password = req.syncPassword;
 
     const evidencesDir = path.join(PORTFOLIOS_DIR, 'evidences');
     if (!fs.existsSync(evidencesDir)) {
@@ -1742,7 +1799,7 @@ app.post('/api/sync/files', upload.single('file'), async (req, res) => {
     let finalFilename = filename;
     try {
       const cryptoManager = require('./crypto-manager');
-      await cryptoManager.encryptFile(filepath, currentPassword);
+      await cryptoManager.encryptFile(filepath, password);
       finalFilename = filename + cryptoManager.ENCRYPTED_EXTENSION;
       console.log(`✅ Archivo sincronizado y encriptado: ${filename}`);
     } catch (encryptError) {
@@ -1757,30 +1814,80 @@ app.post('/api/sync/files', upload.single('file'), async (req, res) => {
 });
 
 // 4. Descargar archivo de evidencia (hacia móvil)
-app.get('/api/sync/files/:filename', (req, res) => {
-  const { filename } = req.params;
+app.get('/api/sync/files/:filename', authenticateSyncRequest, async (req, res) => {
+  let { filename } = req.params;
+  const password = req.syncPassword;
 
-  // Buscar en carpetas planas (nuevo sistema)
-  let filepath = path.join(PORTFOLIOS_DIR, 'evidences', filename);
+  // Si el filename viene con .enc, quitarlo (el móvil puede enviarlo con o sin .enc)
+  const cleanFilename = filename.replace(/\.enc$/i, '');
 
-  if (!fs.existsSync(filepath)) {
-    // Intentar buscar en estructura antigua (fallback)
-    // Esto es complicado porque requeriría consultar la BD para saber la ruta antigua...
-    // Por simplicidad, asumimos que todo se mueve a evidences/ o la BD tiene la ruta correcta relativa
+  try {
+    // Buscar archivo en carpetas planas (nuevo sistema)
+    let filepath = path.join(PORTFOLIOS_DIR, 'evidences', cleanFilename);
+    let encryptedFilepath = filepath + '.enc';
 
-    // Consultar BD para ver si es una ruta relativa antigua
-    db.get('SELECT file_path FROM evidences WHERE file_path LIKE ?', [`%${filename}`], (err, row) => {
-      if (err || !row) {
+    // Verificar si el archivo existe (sin encriptar o encriptado)
+    const fileExists = fs.existsSync(filepath);
+    const encryptedExists = fs.existsSync(encryptedFilepath);
+
+    if (!fileExists && !encryptedExists) {
+      // Intentar buscar en BD para estructura antigua
+      const row = await new Promise((resolve, reject) => {
+        db.get('SELECT file_path FROM evidences WHERE file_path LIKE ?', [`%${filename}`], (err, row) => {
+          if (err) reject(err);
+          else resolve(row);
+        });
+      });
+
+      if (!row) {
         return res.status(404).json({ error: 'File not found' });
       }
 
-      // Construir ruta completa basada en lo que hay en BD
+      // Actualizar rutas con la información de la BD
       filepath = path.join(PORTFOLIOS_DIR, row.file_path);
+      encryptedFilepath = filepath + '.enc';
+    }
 
-      serveFile(res, filepath);
+    // Determinar tipo MIME
+    const ext = path.extname(filename).toLowerCase();
+    let mimeType = 'application/octet-stream';
+    if (ext === '.jpg' || ext === '.jpeg') mimeType = 'image/jpeg';
+    else if (ext === '.png') mimeType = 'image/png';
+    else if (ext === '.mp4') mimeType = 'video/mp4';
+    else if (ext === '.webm') mimeType = 'video/webm';
+    else if (ext === '.mp3') mimeType = 'audio/mpeg';
+    else if (ext === '.wav') mimeType = 'audio/wav';
+
+    // Si existe encriptado, desencriptar en memoria y servir
+    if (fs.existsSync(encryptedFilepath)) {
+      console.log(`🔓 Desencriptando archivo para sincronización: ${filename}`);
+
+      // Usar DecryptionCache para desencriptar en memoria
+      const fileBuffer = await decryptionCache.get(filepath, password);
+
+      // Servir archivo desencriptado desde memoria
+      res.set('Content-Type', mimeType);
+      res.set('Content-Length', fileBuffer.length);
+      res.set('Cache-Control', 'no-cache'); // No cachear en el móvil
+      res.send(fileBuffer);
+
+      console.log(`✅ Archivo servido (desencriptado): ${filename} (${fileBuffer.length} bytes)`);
+    }
+    // Si existe sin encriptar, servirlo directamente
+    else if (fs.existsSync(filepath)) {
+      console.log(`📤 Sirviendo archivo sin encriptar: ${filename}`);
+      res.set('Content-Type', mimeType);
+      res.sendFile(filepath);
+    }
+    else {
+      return res.status(404).json({ error: 'File not found on disk' });
+    }
+  } catch (error) {
+    console.error(`❌ Error sirviendo archivo ${filename}:`, error);
+    res.status(500).json({
+      error: 'Error serving file',
+      message: error.message
     });
-  } else {
-    serveFile(res, filepath);
   }
 });
 
