@@ -317,12 +317,83 @@
             <option value="Todas">Todas las asignaturas</option>
             <!-- Se poblará dinámicamente -->
           </select>
+          <button id="toggleSelectionMode" onclick="toggleSelectionMode()" class="secondary-btn">
+            ☑️ Seleccionar
+          </button>
           <button onclick="exitGalleryView()" class="secondary-btn">← Volver (ESC)</button>
         </div>
       </div>
 
       <div id="galleryGrid" class="gallery-grid">
         <!-- Las fotos se cargarán aquí -->
+      </div>
+
+      <!-- Barra de acciones flotante para selección múltiple -->
+      <div id="selectionActionBar" class="selection-action-bar">
+        <div class="selection-info">
+          <span id="selectedCount">0</span> evidencias seleccionadas
+        </div>
+        <div class="selection-actions">
+          <button onclick="selectAll()" class="action-btn secondary">
+            ☑️ Seleccionar todas
+          </button>
+          <button onclick="deselectAll()" class="action-btn secondary">
+            ❌ Deseleccionar
+          </button>
+          <button onclick="deleteSelectedEvidences()" class="action-btn danger">
+            🗑️ Eliminar
+          </button>
+          <button onclick="exportSelectedEvidences()" class="action-btn primary">
+            📦 Exportar ZIP
+          </button>
+        </div>
+      </div>
+
+      <!-- Modal para exportación de evidencias -->
+      <div id="zipPasswordModal" class="modal" style="display: none;">
+        <div class="modal-content">
+          <h2>📦 Exportar Evidencias</h2>
+          <p>Se exportarán <strong id="zipExportCount">0</strong> evidencias.</p>
+
+          <!-- Selector de tipo de exportación -->
+          <div class="form-group">
+            <label style="font-weight: bold; margin-bottom: 10px; display: block;">Tipo de exportación:</label>
+            <div style="display: flex; flex-direction: column; gap: 12px;">
+              <label style="display: flex; align-items: center; cursor: pointer; padding: 10px; border: 1px solid rgba(255,255,255,0.2); border-radius: 6px;">
+                <input type="radio" name="exportType" value="encrypted" checked onchange="togglePasswordFields()">
+                <div style="margin-left: 10px;">
+                  <strong>🔐 ZIP con contraseña</strong>
+                  <div style="font-size: 12px; opacity: 0.7;">Protegido con contraseña, ideal para archivos seguros</div>
+                </div>
+              </label>
+              <label style="display: flex; align-items: center; cursor: pointer; padding: 10px; border: 1px solid rgba(255,255,255,0.2); border-radius: 6px;">
+                <input type="radio" name="exportType" value="pixelated" onchange="togglePasswordFields()">
+                <div style="margin-left: 10px;">
+                  <strong>🎭 Caras pixeladas</strong>
+                  <div style="font-size: 12px; opacity: 0.7;">Rostros difuminados, listo para compartir (ZIP sin contraseña)</div>
+                </div>
+              </label>
+            </div>
+          </div>
+
+          <!-- Campos de contraseña (solo para ZIP encriptado) -->
+          <div id="passwordFields">
+            <div class="form-group">
+              <label for="zipPassword">Contraseña del ZIP:</label>
+              <input type="password" id="zipPassword" placeholder="Mínimo 4 caracteres" minlength="4">
+            </div>
+            <div class="form-group">
+              <label for="zipPasswordConfirm">Confirmar contraseña:</label>
+              <input type="password" id="zipPasswordConfirm" placeholder="Repite la contraseña">
+            </div>
+          </div>
+
+          <div id="zipPasswordError" style="color: #f44336; display: none;"></div>
+          <div style="display: flex; gap: 10px; margin-top: 20px;">
+            <button onclick="closeZipPasswordModal()" class="secondary-btn">Cancelar</button>
+            <button onclick="confirmZipExport()">📦 Exportar</button>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -343,6 +414,7 @@
   <!-- Scripts -->
   <script src="opencv.js" async onload="onOpenCvReady()" onerror="onOpenCvError()"></script>
   <script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/dist/face-api.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
   <script src="imageClassification.js"></script>
   <script src="documentProcessor.js"></script>
   <script src="faceRecognition.js"></script>

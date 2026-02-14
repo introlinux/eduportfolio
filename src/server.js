@@ -6,7 +6,12 @@ const fs = require('fs');
 const os = require('os');
 const sqlite3 = require('sqlite3').verbose();
 const multer = require('multer');
+const archiver = require('archiver');
+const archiverZipEncrypted = require('archiver-zip-encrypted');
 const faceDbModule = null; // Se cargará después de asegurar las carpetas
+
+// Registrar formato de archiver con encriptación
+archiver.registerFormat('zip-encrypted', archiverZipEncrypted);
 
 // === SISTEMA DE ENCRIPTACIÓN ===
 const { PasswordManager, DEFAULT_PASSWORD } = require('./password-manager');
@@ -990,6 +995,204 @@ app.delete('/api/evidences/:id', (req, res) => {
       res.json({ success: true, message: 'Evidencia eliminada correctamente' });
     });
   });
+});
+
+// 4.2. Eliminar evidencias por lotes (batch)
+app.delete('/api/evidences/batch', (req, res) => {
+  const { ids } = req.body;
+
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return res.status(400).json({ error: 'Array de IDs requerido' });
+  }
+
+  if (!isAuthenticated || !currentPassword) {
+    return res.status(401).json({ error: 'No autenticado' });
+  }
+
+  const placeholders = ids.map(() => '?').join(',');
+
+  // Obtener rutas de archivos
+  db.all(`SELECT id, file_path FROM evidences WHERE id IN (${placeholders})`, ids, (err, rows) => {
+    if (err) return res.status(500).json({ error: err.message });
+
+    // Eliminar de BD
+    db.run(`DELETE FROM evidences WHERE id IN (${placeholders})`, ids, function(err) {
+      if (err) return res.status(500).json({ error: err.message });
+
+      // Eliminar archivos físicos
+      rows.forEach(row => {
+        const fullPath = path.join(PORTFOLIOS_DIR, row.file_path);
+        if (fs.existsSync(fullPath)) {
+          fs.unlink(fullPath, (err) => {
+            if (err) console.error(`Error borrando ${fullPath}:`, err);
+            else console.log(`✅ Archivo borrado: ${fullPath}`);
+          });
+        }
+      });
+
+      res.json({
+        success: true,
+        deletedCount: this.changes,
+        message: `${this.changes} evidencias eliminadas`
+      });
+    });
+  });
+});
+
+// 4.3. Exportar evidencias a ZIP con contraseña
+app.post('/api/evidences/batch/export', async (req, res) => {
+  const { ids, zipPassword } = req.body;
+
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return res.status(400).json({ error: 'Array de IDs requerido' });
+  }
+  if (!zipPassword || zipPassword.length < 4) {
+    return res.status(400).json({ error: 'Contraseña de al menos 4 caracteres' });
+  }
+  if (!isAuthenticated || !currentPassword) {
+    return res.status(401).json({ error: 'No autenticado' });
+  }
+
+  try {
+    const placeholders = ids.map(() => '?').join(',');
+    const query = `
+      SELECT e.id, e.file_path, e.capture_date,
+             s.name as student_name, sub.name as subject_name
+      FROM evidences e
+      LEFT JOIN students s ON e.student_id = s.id
+      LEFT JOIN subjects sub ON e.subject_id = sub.id
+      WHERE e.id IN (${placeholders})
+    `;
+
+    db.all(query, ids, async (err, rows) => {
+      if (err) return res.status(500).json({ error: err.message });
+      if (rows.length === 0) return res.status(404).json({ error: 'Sin evidencias' });
+
+      // Configurar descarga
+      const timestamp = new Date().toISOString().replace(/:/g, '-').split('.')[0];
+      res.setHeader('Content-Type', 'application/zip');
+      res.setHeader('Content-Disposition', `attachment; filename="evidencias_${timestamp}.zip"`);
+
+      // Crear archiver con encriptación AES-256
+      const archive = archiver.create('zip-encrypted', {
+        zlib: { level: 8 },
+        encryptionMethod: 'aes256',
+        password: zipPassword
+      });
+
+      archive.on('error', (err) => {
+        console.error('Error en archiver:', err);
+        if (!res.headersSent) res.status(500).json({ error: 'Error creando ZIP' });
+      });
+
+      archive.pipe(res);
+
+      // Agregar evidencias al ZIP
+      for (const row of rows) {
+        try {
+          const filePath = path.join(PORTFOLIOS_DIR, row.file_path);
+
+          // Desencriptar en memoria
+          const imageBuffer = await decryptionCache.get(filePath, currentPassword);
+
+          // Nombre descriptivo: fecha_estudiante_asignatura_id.jpg
+          const ext = path.extname(row.file_path).replace('.enc', '');
+          const date = new Date(row.capture_date).toISOString().split('T')[0];
+          const student = (row.student_name || 'SinEstudiante').replace(/\s+/g, '_');
+          const subject = (row.subject_name || 'General').replace(/\s+/g, '_');
+          const fileName = `${date}_${student}_${subject}_${row.id}${ext}`;
+
+          archive.append(imageBuffer, { name: fileName });
+          console.log(`  ✅ Agregado: ${fileName}`);
+        } catch (error) {
+          console.error(`Error procesando evidencia ${row.id}:`, error);
+        }
+      }
+
+      await archive.finalize();
+      console.log('✅ ZIP enviado');
+    });
+  } catch (error) {
+    console.error('Error en exportación:', error);
+    if (!res.headersSent) res.status(500).json({ error: error.message });
+  }
+});
+
+// 4.4. Desencriptar evidencias y retornar como base64 (para pixelado en frontend)
+app.post('/api/evidences/batch/decrypt', async (req, res) => {
+  const { ids } = req.body;
+
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return res.status(400).json({ error: 'Array de IDs requerido' });
+  }
+  if (!isAuthenticated || !currentPassword) {
+    return res.status(401).json({ error: 'No autenticado' });
+  }
+
+  try {
+    const placeholders = ids.map(() => '?').join(',');
+    const query = `
+      SELECT e.id, e.file_path, e.capture_date,
+             s.name as student_name, sub.name as subject_name
+      FROM evidences e
+      LEFT JOIN students s ON e.student_id = s.id
+      LEFT JOIN subjects sub ON e.subject_id = sub.id
+      WHERE e.id IN (${placeholders})
+    `;
+
+    db.all(query, ids, async (err, rows) => {
+      if (err) return res.status(500).json({ error: err.message });
+      if (rows.length === 0) return res.status(404).json({ error: 'Sin evidencias' });
+
+      const images = [];
+
+      // Desencriptar cada evidencia y convertir a base64
+      for (const row of rows) {
+        try {
+          const filePath = path.join(PORTFOLIOS_DIR, row.file_path);
+
+          // Desencriptar en memoria
+          const imageBuffer = await decryptionCache.get(filePath, currentPassword);
+
+          // Convertir a base64
+          const base64Image = imageBuffer.toString('base64');
+
+          // Obtener extensión correctamente (quitar .enc primero)
+          const pathWithoutEnc = row.file_path.replace('.enc', '');
+          let ext = path.extname(pathWithoutEnc).toLowerCase();
+
+          // Si no hay extensión, usar .jpg por defecto
+          if (!ext) ext = '.jpg';
+
+          const mimeType = ext === '.png' ? 'image/png' : 'image/jpeg';
+
+          // Nombre descriptivo
+          const date = new Date(row.capture_date).toISOString().split('T')[0];
+          const student = (row.student_name || 'SinEstudiante').replace(/\s+/g, '_');
+          const subject = (row.subject_name || 'General').replace(/\s+/g, '_');
+          const fileName = `${date}_${student}_${subject}_${row.id}${ext}`;
+
+          images.push({
+            id: row.id,
+            imageBase64: `data:${mimeType};base64,${base64Image}`,
+            fileName: fileName,
+            student: row.student_name || 'Sin asignar',
+            subject: row.subject_name || 'General'
+          });
+
+          console.log(`  ✅ Desencriptado: ${fileName}`);
+        } catch (error) {
+          console.error(`Error procesando evidencia ${row.id}:`, error);
+        }
+      }
+
+      res.json(images);
+      console.log(`✅ ${images.length} imágenes desencriptadas y enviadas`);
+    });
+  } catch (error) {
+    console.error('Error en desencriptación:', error);
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // 5. Activar Modo Sesión (15 minutos)

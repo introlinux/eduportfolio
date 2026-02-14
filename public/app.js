@@ -22,6 +22,11 @@ let currentLightboxIndex = -1;
 let lightboxZoomLevel = 1; // Track zoom state: 1 = normal, 2 = zoomed
 let lightboxPanState = { x: 0, y: 0, isDragging: false, startX: 0, startY: 0 };
 
+// Estado de selección múltiple
+let selectedEvidences = new Set(); // IDs de evidencias seleccionadas
+let selectionMode = false; // true cuando está activo el modo selección
+let lastSelectedIndex = -1; // Para selección con Shift
+
 const API_URL = 'http://localhost:3000/api';
 
 // ==================== OPENCV (No se usa en tiempo real en Fase 3) ====================
@@ -98,6 +103,19 @@ function showView(viewName) {
 
 function setupKeyboardNavigation() {
   document.addEventListener('keydown', (e) => {
+    // Ignorar atajos de teclado cuando el usuario está escribiendo en un input o textarea
+    const activeElement = document.activeElement;
+    const isTyping = activeElement && (
+      activeElement.tagName === 'INPUT' ||
+      activeElement.tagName === 'TEXTAREA' ||
+      activeElement.isContentEditable
+    );
+
+    // Si está escribiendo, solo permitir ESC para cerrar modales
+    if (isTyping && e.key !== 'Escape') {
+      return; // No ejecutar shortcuts
+    }
+
     // Tecla ESC: Comportamiento contextual
     if (e.key === 'Escape') {
       const lightbox = document.getElementById('lightbox');
@@ -1495,7 +1513,26 @@ async function updateGallery() {
         </div>
       `;
 
-      card.onclick = () => openLightbox(index);
+      // Agregar indicador visual si está seleccionada
+      if (selectedEvidences.has(cap.id)) {
+        card.classList.add('selected');
+      }
+
+      // Indicador de posición en el array para Shift+clic
+      card.dataset.evidenceId = cap.id;
+      card.dataset.arrayIndex = index;
+
+      // Comportamiento de clic según el modo
+      card.onclick = (e) => {
+        if (selectionMode) {
+          // MODO SELECCIÓN: clic simple selecciona/deselecciona
+          handleCardClick(cap.id, index, e.shiftKey);
+        } else {
+          // MODO NORMAL: clic abre lightbox
+          openLightbox(index);
+        }
+      };
+
       grid.appendChild(card);
     });
 
@@ -1994,6 +2031,403 @@ async function toggleCourseStatus(id, isActive) {
     console.error('Error actualizando curso:', error);
     showNotification('Error de conexión', 'error');
   }
+}
+
+// ==================== FUNCIONES DE SELECCIÓN MÚLTIPLE ====================
+
+function toggleSelectionMode() {
+  selectionMode = !selectionMode;
+  const btn = document.getElementById('toggleSelectionMode');
+  const galleryGrid = document.getElementById('galleryGrid');
+
+  if (selectionMode) {
+    btn.textContent = '✕ Cancelar selección';
+    btn.classList.add('active');
+    galleryGrid.classList.add('selection-mode');
+  } else {
+    btn.textContent = '☑️ Seleccionar';
+    btn.classList.remove('active');
+    galleryGrid.classList.remove('selection-mode');
+    deselectAll();
+  }
+}
+
+function handleCardClick(evidenceId, arrayIndex, shiftPressed) {
+  if (shiftPressed && lastSelectedIndex !== -1) {
+    // SHIFT+CLIC: Seleccionar rango
+    selectRange(lastSelectedIndex, arrayIndex);
+  } else {
+    // CLIC SIMPLE: Toggle selección individual
+    if (selectedEvidences.has(evidenceId)) {
+      selectedEvidences.delete(evidenceId);
+    } else {
+      selectedEvidences.add(evidenceId);
+    }
+    lastSelectedIndex = arrayIndex;
+  }
+
+  updateGallery(); // Re-renderizar para actualizar clases CSS
+  updateSelectionUI();
+}
+
+function selectRange(startIndex, endIndex) {
+  const start = Math.min(startIndex, endIndex);
+  const end = Math.max(startIndex, endIndex);
+
+  for (let i = start; i <= end; i++) {
+    if (currentGalleryCaptures[i]) {
+      selectedEvidences.add(currentGalleryCaptures[i].id);
+    }
+  }
+}
+
+function updateSelectionUI() {
+  const count = selectedEvidences.size;
+  const actionBar = document.getElementById('selectionActionBar');
+  const selectedCountSpan = document.getElementById('selectedCount');
+
+  if (count > 0) {
+    actionBar.classList.add('visible');
+    selectedCountSpan.textContent = count;
+  } else {
+    actionBar.classList.remove('visible');
+  }
+}
+
+function selectAll() {
+  currentGalleryCaptures.forEach(cap => {
+    selectedEvidences.add(cap.id);
+  });
+  updateGallery();
+  updateSelectionUI();
+}
+
+function deselectAll() {
+  selectedEvidences.clear();
+  lastSelectedIndex = -1;
+  updateGallery();
+  updateSelectionUI();
+}
+
+function closeZipPasswordModal() {
+  document.getElementById('zipPasswordModal').style.display = 'none';
+  document.getElementById('zipPassword').value = '';
+  document.getElementById('zipPasswordConfirm').value = '';
+  document.getElementById('zipPasswordError').style.display = 'none';
+}
+
+function showError(message) {
+  const errorDiv = document.getElementById('zipPasswordError');
+  errorDiv.textContent = message;
+  errorDiv.style.display = 'block';
+}
+
+// ==================== ELIMINACIÓN BATCH ====================
+
+async function deleteSelectedEvidences() {
+  if (selectedEvidences.size === 0) return;
+
+  const confirmed = confirm(
+    `¿Eliminar ${selectedEvidences.size} evidencias?\n\nEsta acción no se puede deshacer.`
+  );
+  if (!confirmed) return;
+
+  try {
+    const response = await fetch(`${API_URL}/evidences/batch`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: Array.from(selectedEvidences) })
+    });
+
+    if (response.ok) {
+      showNotification('✅ Evidencias eliminadas', 'success');
+      selectedEvidences.clear();
+      updateGallery();
+      updateSelectionUI();
+    } else {
+      const error = await response.json();
+      showNotification(`Error: ${error.error}`, 'error');
+    }
+  } catch (error) {
+    console.error('Error eliminando evidencias:', error);
+    showNotification('Error de conexión', 'error');
+  }
+}
+
+// ==================== EXPORTACIÓN A ZIP CON CONTRASEÑA ====================
+
+function exportSelectedEvidences() {
+  if (selectedEvidences.size === 0) return;
+  document.getElementById('zipExportCount').textContent = selectedEvidences.size;
+  document.getElementById('zipPasswordModal').style.display = 'flex';
+}
+
+async function confirmZipExport() {
+  const exportType = document.querySelector('input[name="exportType"]:checked').value;
+
+  // Verificar qué tipo de exportación se seleccionó
+  if (exportType === 'pixelated') {
+    // Exportar con caras pixeladas
+    closeZipPasswordModal();
+    await exportPixelatedEvidences(Array.from(selectedEvidences));
+  } else {
+    // Exportar con contraseña (flujo original)
+    const password = document.getElementById('zipPassword').value;
+    const passwordConfirm = document.getElementById('zipPasswordConfirm').value;
+
+    // Validaciones
+    if (password.length < 4) {
+      showError('La contraseña debe tener al menos 4 caracteres');
+      return;
+    }
+    if (password !== passwordConfirm) {
+      showError('Las contraseñas no coinciden');
+      return;
+    }
+
+    closeZipPasswordModal();
+    showNotification('📦 Exportando...', 'info');
+
+    try {
+      const response = await fetch(`${API_URL}/evidences/batch/export`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ids: Array.from(selectedEvidences),
+          zipPassword: password
+        })
+      });
+
+      if (response.ok) {
+        // Descargar el ZIP
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `evidencias_${new Date().toISOString().split('T')[0]}.zip`;
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(url);
+        document.body.removeChild(a);
+
+        showNotification('✅ ZIP descargado', 'success');
+        deselectAll();
+      } else {
+        const error = await response.json();
+        showNotification(`Error: ${error.error}`, 'error');
+      }
+    } catch (error) {
+      console.error('Error exportando:', error);
+      showNotification('Error de conexión', 'error');
+    }
+  }
+}
+
+/**
+ * Exportar evidencias con caras pixeladas en un ZIP sin contraseña
+ * @param {Array<number>} ids - IDs de las evidencias a exportar
+ */
+async function exportPixelatedEvidences(ids) {
+  if (ids.length === 0) return;
+
+  try {
+    // Paso 1: Obtener imágenes desencriptadas del backend
+    showNotification('🔄 Obteniendo imágenes...', 'info');
+
+    const response = await fetch(`${API_URL}/evidences/batch/decrypt`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids })
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      showNotification(`Error: ${error.error}`, 'error');
+      return;
+    }
+
+    const images = await response.json();
+    console.log(`📦 Recibidas ${images.length} imágenes`);
+
+    // Paso 2: Asegurar que face-api.js esté cargado
+    if (!faceRecognitionService || !faceRecognitionService.isReady) {
+      showNotification('🔄 Cargando modelos de detección facial...', 'info');
+      if (!faceRecognitionService) {
+        faceRecognitionService = new FaceRecognitionService();
+      }
+      await faceRecognitionService.initialize();
+    }
+
+    // Paso 3: Procesar cada imagen (detectar y pixelar caras)
+    showNotification(`🎭 Pixelando caras (0/${images.length})...`, 'info');
+
+    const zip = new JSZip();
+    let processedCount = 0;
+
+    for (const imgData of images) {
+      try {
+        // Cargar imagen
+        const img = new Image();
+        await new Promise((resolve, reject) => {
+          img.onload = resolve;
+          img.onerror = reject;
+          img.src = imgData.imageBase64;
+        });
+
+        console.log(`🖼️ Procesando: ${imgData.fileName}`);
+
+        // Pixelar caras (tamaño de píxel: 25 para máxima privacidad)
+        const pixelatedDataUrl = await pixelateFaces(img, 25);
+
+        // Convertir a blob
+        const blob = await fetch(pixelatedDataUrl).then(r => r.blob());
+
+        // Agregar al ZIP
+        zip.file(imgData.fileName, blob);
+
+        processedCount++;
+        showNotification(`🎭 Pixelando caras (${processedCount}/${images.length})...`, 'info');
+      } catch (error) {
+        console.error(`Error procesando ${imgData.fileName}:`, error);
+      }
+    }
+
+    // Paso 4: Generar y descargar ZIP
+    showNotification('📦 Creando archivo ZIP...', 'info');
+
+    const zipBlob = await zip.generateAsync({
+      type: 'blob',
+      compression: 'DEFLATE',
+      compressionOptions: { level: 1 } // Nivel 1 = más rápido (JPG no comprime mucho)
+    });
+
+    // Descargar
+    const url = URL.createObjectURL(zipBlob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `evidencias_pixeladas_${new Date().toISOString().split('T')[0]}.zip`;
+    document.body.appendChild(a);
+    a.click();
+    URL.revokeObjectURL(url);
+    document.body.removeChild(a);
+
+    showNotification(`✅ ZIP descargado con ${processedCount} imágenes`, 'success');
+    deselectAll();
+  } catch (error) {
+    console.error('Error en exportación pixelada:', error);
+    showNotification('❌ Error al exportar', 'error');
+  }
+}
+
+// ==================== FUNCIONES DE PIXELADO DE CARAS ====================
+
+function togglePasswordFields() {
+  const exportType = document.querySelector('input[name="exportType"]:checked').value;
+  const passwordFields = document.getElementById('passwordFields');
+
+  if (exportType === 'encrypted') {
+    passwordFields.style.display = 'block';
+  } else {
+    passwordFields.style.display = 'none';
+  }
+}
+
+/**
+ * Pixelar una región específica del canvas (efecto mosaico)
+ * @param {CanvasRenderingContext2D} ctx - Contexto del canvas
+ * @param {number} x - Posición X inicial
+ * @param {number} y - Posición Y inicial
+ * @param {number} width - Ancho de la región
+ * @param {number} height - Alto de la región
+ * @param {number} blockSize - Tamaño del píxel del mosaico
+ */
+function pixelateRegion(ctx, x, y, width, height, blockSize = 15) {
+  // Asegurar que las coordenadas estén dentro del canvas
+  x = Math.max(0, Math.floor(x));
+  y = Math.max(0, Math.floor(y));
+  width = Math.floor(width);
+  height = Math.floor(height);
+
+  // Expandir un poco el área para cubrir mejor la cara
+  const padding = blockSize * 2;
+  x = Math.max(0, x - padding);
+  y = Math.max(0, y - padding);
+  width = width + padding * 2;
+  height = height + padding * 2;
+
+  // Crear efecto mosaico
+  for (let px = x; px < x + width; px += blockSize) {
+    for (let py = y; py < y + height; py += blockSize) {
+      // Obtener el color del pixel central del bloque
+      const sampleX = Math.min(px + Math.floor(blockSize / 2), ctx.canvas.width - 1);
+      const sampleY = Math.min(py + Math.floor(blockSize / 2), ctx.canvas.height - 1);
+
+      try {
+        const pixelData = ctx.getImageData(sampleX, sampleY, 1, 1).data;
+        ctx.fillStyle = `rgb(${pixelData[0]},${pixelData[1]},${pixelData[2]})`;
+
+        // Dibujar bloque
+        const blockWidth = Math.min(blockSize, ctx.canvas.width - px);
+        const blockHeight = Math.min(blockSize, ctx.canvas.height - py);
+        ctx.fillRect(px, py, blockWidth, blockHeight);
+      } catch (e) {
+        // Ignorar errores en bordes
+      }
+    }
+  }
+}
+
+/**
+ * Detectar caras y pixelarlas en una imagen
+ * @param {HTMLImageElement} imageElement - Elemento de imagen
+ * @param {number} pixelSize - Tamaño del píxel (bloques)
+ * @returns {Promise<string>} - Data URL de la imagen pixelada
+ */
+async function pixelateFaces(imageElement, pixelSize = 15) {
+  // Crear canvas
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  canvas.width = imageElement.width;
+  canvas.height = imageElement.height;
+
+  // Dibujar imagen original
+  ctx.drawImage(imageElement, 0, 0);
+
+  try {
+    // Detectar caras usando face-api.js
+    const detections = await faceapi
+      .detectAllFaces(imageElement, new faceapi.SsdMobilenetv1Options({ minConfidence: 0.3 }))
+      .withFaceLandmarks();
+
+    // Si no detecta con SSD, intentar con Tiny (más rápido pero menos preciso)
+    if (detections.length === 0) {
+      const tinyDetections = await faceapi
+        .detectAllFaces(imageElement, new faceapi.TinyFaceDetectorOptions({ scoreThreshold: 0.2 }))
+        .withFaceLandmarks();
+
+      if (tinyDetections.length > 0) {
+        detections.push(...tinyDetections);
+      }
+    }
+
+    console.log(`🎭 Detectadas ${detections.length} cara(s) en la imagen`);
+
+    // Pixelar cada cara detectada
+    detections.forEach((detection, index) => {
+      const box = detection.detection.box;
+      console.log(`  → Pixelando cara ${index + 1}: x=${Math.floor(box.x)}, y=${Math.floor(box.y)}, w=${Math.floor(box.width)}, h=${Math.floor(box.height)}`);
+      pixelateRegion(ctx, box.x, box.y, box.width, box.height, pixelSize);
+    });
+
+    if (detections.length === 0) {
+      console.warn('⚠️ No se detectaron caras en la imagen');
+    }
+  } catch (error) {
+    console.error('Error detectando caras:', error);
+  }
+
+  // Retornar imagen procesada como data URL
+  return canvas.toDataURL('image/jpeg', 0.92);
 }
 
 console.log('✅ EduPortfolio Fase 3 - Cabina de Fotos cargado');
