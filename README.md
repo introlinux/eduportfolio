@@ -7,7 +7,7 @@
 
 > **Sistema autónomo de captura y clasificación de evidencias educativas con IA local y privacidad por diseño**
 
-EduPortfolio es una solución innovadora que digitaliza automáticamente los trabajos escolares de alumnos de Infantil y Primaria, utilizando reconocimiento facial, visión por computador e inteligencia artificial, todo procesado localmente sin conexión a internet.
+EduPortfolio es una solución innovadora que digitaliza automáticamente los trabajos escolares de alumnos de Infantil y Primaria, utilizando reconocimiento facial, visión por computador e inteligencia artificial, todo procesado localmente sin conexión a internet. Eduportfolio (versión escritorio) Forma parte de la segunda fase de un proyecto que conforma dos aplicaciones que pueden trabajar conjuintamente: [una aplicación móvil](https://github.com/introlinux/eduportfolio-mobile) y ésta de escritorio.
 
 ---
 
