@@ -253,10 +253,10 @@
         const response = await fetch(`${API_BASE}/auth/status`);
         const data = await response.json();
 
-        if (data.isAuthenticated) {
-          // Ya está autenticado, redirigir a la app principal
-          window.location.href = '/';
-        }
+        // Removido auto-redirect - siempre mostrar login primero
+        // if (data.isAuthenticated) {
+        //   window.location.href = '/';
+        // }
 
         if (data.vaultLocked) {
           statusTextEl.textContent = '🔒 Bloqueado - Archivos encriptados';

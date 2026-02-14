@@ -1,4 +1,4 @@
-const { app, BrowserWindow } = require('electron');
+const { app, BrowserWindow, Menu } = require('electron');
 const path = require('path');
 const { fork } = require('child_process');
 const net = require('net');
@@ -56,6 +56,9 @@ async function startServer() {
 async function createWindow() {
     const port = await startServer();
 
+    // Ocultar la barra de menú
+    Menu.setApplicationMenu(null);
+
     mainWindow = new BrowserWindow({
         width: 1280,
         height: 720,
@@ -63,13 +66,14 @@ async function createWindow() {
             nodeIntegration: false,
             contextIsolation: true,
         },
-        title: "EduPortfolio - Cabina de Fotos",
+        title: "EduPortfolio",
+        autoHideMenuBar: true,
         // icon: path.join(__dirname, '../public/favicon.ico') // Añadir icono si existe
     });
 
     // El servidor tarda un momento en arrancar
     setTimeout(() => {
-        mainWindow.loadURL(`http://localhost:${port}`);
+        mainWindow.loadURL(`http://localhost:${port}/login.html`);
     }, 3000);
 
     // Modo pantalla completa para la cabina (opcional, se puede activar con F11)

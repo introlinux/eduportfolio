@@ -30,12 +30,20 @@ const upload = multer({
   },
 });
 
-// --- CONFIGURACIÓN DE RUTAS DE ARMEACENAMIENTO ---
+// --- CONFIGURACIÓN DE RUTAS DE ALMACENAMIENTO ---
 // Si hay USER_DATA_PATH (Prod), usamos esa ruta. Si no (Dev), usamos la local del proyecto.
 const BASE_DATA_PATH = USER_DATA_PATH || path.join(__dirname, '..');
 const DATA_DIR = path.join(BASE_DATA_PATH, 'data');
 const PORTFOLIOS_DIR = path.join(BASE_DATA_PATH, 'portfolios');
 const PUBLIC_DIR = path.join(__dirname, '../public'); // El código estático siempre va con el bundle
+
+// Logging para debug
+console.log('=== CONFIGURACIÓN DE RUTAS ===');
+console.log('USER_DATA_PATH:', USER_DATA_PATH);
+console.log('BASE_DATA_PATH:', BASE_DATA_PATH);
+console.log('DATA_DIR:', DATA_DIR);
+console.log('PORTFOLIOS_DIR:', PORTFOLIOS_DIR);
+console.log('==============================');
 
 // Asegurar que existan las carpetas de datos
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -209,6 +217,22 @@ function initDatabase() {
     `);
 
     // === MIGRACIONES DE DATOS ===
+
+    // Migración 0: Limpiar duplicados de asignaturas (por si acaso)
+    db.run(`
+      DELETE FROM subjects
+      WHERE id NOT IN (
+        SELECT MIN(id)
+        FROM subjects
+        GROUP BY name
+      )
+    `, (err) => {
+      if (err) {
+        console.error('❌ Error limpiando duplicados:', err.message);
+      } else {
+        console.log('✅ Limpieza de duplicados completada');
+      }
+    });
 
     // Migración 1: Poblar tabla de asignaturas con valores por defecto
     db.all("SELECT name FROM subjects", (err, existingSubjects) => {

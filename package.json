@@ -8,8 +8,12 @@
     "dev": "node src/server.js",
     "test": "jest",
     "rebuild": "electron-rebuild",
+    "generate:icons": "node scripts/generate-icons.js",
     "electron:dev": "electron src/main.js",
-    "electron:build": "npm run rebuild && electron-builder"
+    "electron:build": "npm run rebuild && electron-builder",
+    "electron:build:win": "npm run rebuild && electron-builder --win",
+    "electron:build:linux": "npm run rebuild && electron-builder --linux",
+    "electron:build:all": "npm run rebuild && electron-builder --win --linux"
   },
   "dependencies": {
     "@tensorflow/tfjs": "^4.11.0",
@@ -29,7 +33,8 @@
     "electron": "^33.4.11",
     "electron-builder": "^26.4.0",
     "electron-packager": "^17.1.2",
-    "jest": "^30.2.0"
+    "jest": "^30.2.0",
+    "png-to-ico": "^3.0.1"
   },
   "keywords": [
     "education",
@@ -46,8 +51,47 @@
       "output": "dist"
     },
     "npmRebuild": false,
+    "files": [
+      "src/**/*",
+      "public/**/*",
+      "node_modules/**/*",
+      "package.json",
+      "!data/**/*",
+      "!portfolios/**/*"
+    ],
     "win": {
-      "target": "nsis"
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "src/assets/icon.ico",
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "EduPortfolio"
+    },
+    "linux": {
+      "target": [
+        "tar.gz",
+        "zip"
+      ],
+      "category": "Education",
+      "icon": "src/assets/icon.png",
+      "description": "Sistema de captura y clasificación de evidencias educativas"
     },
     "asar": true,
     "asarUnpack": [
