@@ -1,9 +1,9 @@
 /**
- * 🔐 Crypto Manager - Sistema de Encriptación AES-256-GCM
- * 
- * Módulo responsable de la encriptación y desencriptación de archivos
- * usando AES-256-GCM con derivación de clave PBKDF2.
- * 
+ * Crypto Manager - AES-256-GCM Encryption System
+ *
+ * Module responsible for file encryption and decryption
+ * using AES-256-GCM with PBKDF2 key derivation.
+ *
  * @module crypto-manager
  * @author Antonio Sánchez León
  */
@@ -12,24 +12,23 @@ const crypto = require('crypto');
 const fs = require('fs').promises;
 const path = require('path');
 
-// === CONSTANTES DE CONFIGURACIÓN ===
+// Encryption configuration constants
 const ALGORITHM = 'aes-256-gcm';
 const KEY_LENGTH = 32; // 256 bits
 const IV_LENGTH = 16; // 128 bits
 const SALT_LENGTH = 32; // 256 bits
 const AUTH_TAG_LENGTH = 16; // 128 bits
-const PBKDF2_ITERATIONS = 100000; // Recomendado por OWASP
+const PBKDF2_ITERATIONS = 100000; // OWASP recommended
 const PBKDF2_DIGEST = 'sha512';
 
-// Extensión para archivos encriptados
 const ENCRYPTED_EXTENSION = '.enc';
 
 /**
- * Deriva una clave criptográfica desde una contraseña usando PBKDF2
- * 
- * @param {string} password - Contraseña del usuario
- * @param {Buffer} salt - Salt aleatorio (debe ser único por archivo)
- * @returns {Promise<Buffer>} Clave derivada de 256 bits
+ * Derives a cryptographic key from a password using PBKDF2
+ *
+ * @param {string} password - User password
+ * @param {Buffer} salt - Random salt (must be unique per file)
+ * @returns {Promise<Buffer>} Derived 256-bit key
  */
 function deriveKey(password, salt) {
     return new Promise((resolve, reject) => {
@@ -40,52 +39,50 @@ function deriveKey(password, salt) {
             KEY_LENGTH,
             PBKDF2_DIGEST,
             (err, derivedKey) => {
-                if (err) reject(err);
-                else resolve(derivedKey);
+                if (err) {
+                    reject(err);
+                    return;
+                }
+                resolve(derivedKey);
             }
         );
     });
 }
 
 /**
- * Encripta un buffer de datos usando AES-256-GCM
- * 
- * @param {Buffer} buffer - Datos a encriptar
- * @param {string} password - Contraseña para derivar la clave
- * @returns {Promise<Buffer>} Buffer encriptado con formato: [salt][iv][authTag][datos]
+ * Encrypts a data buffer using AES-256-GCM
+ *
+ * @param {Buffer} buffer - Data to encrypt
+ * @param {string} password - Password to derive the key
+ * @returns {Promise<Buffer>} Encrypted buffer with format: [salt][iv][authTag][data]
  */
 async function encryptBuffer(buffer, password) {
-    // Generar salt e IV aleatorios
     const salt = crypto.randomBytes(SALT_LENGTH);
     const iv = crypto.randomBytes(IV_LENGTH);
 
-    // Derivar clave desde contraseña
     const key = await deriveKey(password, salt);
 
-    // Crear cipher y encriptar
     const cipher = crypto.createCipheriv(ALGORITHM, key, iv);
     const encrypted = Buffer.concat([
         cipher.update(buffer),
         cipher.final()
     ]);
 
-    // Obtener authentication tag (GCM)
     const authTag = cipher.getAuthTag();
 
-    // Formato: [salt(32)][iv(16)][authTag(16)][datos encriptados]
+    // Format: [salt(32)][iv(16)][authTag(16)][encrypted data]
     return Buffer.concat([salt, iv, authTag, encrypted]);
 }
 
 /**
- * Desencripta un buffer de datos encriptado con AES-256-GCM
- * 
- * @param {Buffer} encryptedBuffer - Buffer encriptado con formato: [salt][iv][authTag][datos]
- * @param {string} password - Contraseña para derivar la clave
- * @returns {Promise<Buffer>} Buffer desencriptado
- * @throws {Error} Si la contraseña es incorrecta o los datos están corruptos
+ * Decrypts an encrypted data buffer using AES-256-GCM
+ *
+ * @param {Buffer} encryptedBuffer - Encrypted buffer with format: [salt][iv][authTag][data]
+ * @param {string} password - Password to derive the key
+ * @returns {Promise<Buffer>} Decrypted buffer
+ * @throws {Error} If password is incorrect or data is corrupted
  */
 async function decryptBuffer(encryptedBuffer, password) {
-    // Extraer componentes del buffer encriptado
     const salt = encryptedBuffer.slice(0, SALT_LENGTH);
     const iv = encryptedBuffer.slice(SALT_LENGTH, SALT_LENGTH + IV_LENGTH);
     const authTag = encryptedBuffer.slice(
@@ -94,105 +91,90 @@ async function decryptBuffer(encryptedBuffer, password) {
     );
     const encrypted = encryptedBuffer.slice(SALT_LENGTH + IV_LENGTH + AUTH_TAG_LENGTH);
 
-    // Derivar clave desde contraseña
     const key = await deriveKey(password, salt);
 
-    // Crear decipher y desencriptar
     const decipher = crypto.createDecipheriv(ALGORITHM, key, iv);
     decipher.setAuthTag(authTag);
 
     try {
-        const decrypted = Buffer.concat([
+        return Buffer.concat([
             decipher.update(encrypted),
             decipher.final()
         ]);
-        return decrypted;
     } catch (error) {
-        throw new Error('Contraseña incorrecta o datos corruptos');
+        throw new Error('Incorrect password or corrupted data');
     }
 }
 
 /**
- * Encripta un archivo en disco
- * 
- * @param {string} filePath - Ruta absoluta del archivo a encriptar
- * @param {string} password - Contraseña para encriptar
+ * Encrypts a file on disk
+ *
+ * @param {string} filePath - Absolute path to file to encrypt
+ * @param {string} password - Password for encryption
  * @returns {Promise<{success: boolean, encryptedPath: string}>}
  */
 async function encryptFile(filePath, password) {
     try {
-        // Leer archivo original
         const fileBuffer = await fs.readFile(filePath);
-
-        // Encriptar contenido
         const encryptedBuffer = await encryptBuffer(fileBuffer, password);
 
-        // Guardar archivo encriptado con extensión .enc
         const encryptedPath = filePath + ENCRYPTED_EXTENSION;
         await fs.writeFile(encryptedPath, encryptedBuffer);
-
-        // Eliminar archivo original (solo queda el encriptado)
         await fs.unlink(filePath);
 
         return { success: true, encryptedPath };
     } catch (error) {
-        throw new Error(`Error encriptando archivo ${filePath}: ${error.message}`);
+        throw new Error(`Error encrypting file ${filePath}: ${error.message}`);
     }
 }
 
 /**
- * Desencripta un archivo en disco
- * 
- * @param {string} encryptedFilePath - Ruta absoluta del archivo encriptado (.enc)
- * @param {string} password - Contraseña para desencriptar
+ * Decrypts a file on disk
+ *
+ * @param {string} encryptedFilePath - Absolute path to encrypted file (.enc)
+ * @param {string} password - Password for decryption
  * @returns {Promise<{success: boolean, decryptedPath: string}>}
  */
 async function decryptFile(encryptedFilePath, password) {
     try {
-        // Leer archivo encriptado
         const encryptedBuffer = await fs.readFile(encryptedFilePath);
-
-        // Desencriptar contenido
         const decryptedBuffer = await decryptBuffer(encryptedBuffer, password);
 
-        // Guardar archivo desencriptado (quitar extensión .enc)
         const decryptedPath = encryptedFilePath.replace(ENCRYPTED_EXTENSION, '');
         await fs.writeFile(decryptedPath, decryptedBuffer);
-
-        // Eliminar archivo encriptado (solo queda el desencriptado)
         await fs.unlink(encryptedFilePath);
 
         return { success: true, decryptedPath };
     } catch (error) {
-        throw new Error(`Error desencriptando archivo ${encryptedFilePath}: ${error.message}`);
+        throw new Error(`Error decrypting file ${encryptedFilePath}: ${error.message}`);
     }
 }
 
 /**
- * Verifica si un archivo está encriptado (tiene extensión .enc)
- * 
- * @param {string} filePath - Ruta del archivo
- * @returns {boolean}
+ * Checks if a file is encrypted (has .enc extension)
+ *
+ * @param {string} filePath - File path
+ * @returns {boolean} True if file is encrypted
  */
 function isEncrypted(filePath) {
     return path.extname(filePath) === ENCRYPTED_EXTENSION;
 }
 
 /**
- * Obtiene la ruta del archivo encriptado correspondiente
- * 
- * @param {string} filePath - Ruta del archivo original
- * @returns {string} Ruta con extensión .enc
+ * Gets the corresponding encrypted file path
+ *
+ * @param {string} filePath - Original file path
+ * @returns {string} Path with .enc extension
  */
 function getEncryptedPath(filePath) {
     return filePath + ENCRYPTED_EXTENSION;
 }
 
 /**
- * Obtiene la ruta del archivo desencriptado correspondiente
- * 
- * @param {string} encryptedFilePath - Ruta del archivo encriptado
- * @returns {string} Ruta sin extensión .enc
+ * Gets the corresponding decrypted file path
+ *
+ * @param {string} encryptedFilePath - Encrypted file path
+ * @returns {string} Path without .enc extension
  */
 function getDecryptedPath(encryptedFilePath) {
     return encryptedFilePath.replace(ENCRYPTED_EXTENSION, '');

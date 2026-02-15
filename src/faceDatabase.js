@@ -1,12 +1,27 @@
+/**
+ * Face Database - Facial Recognition Database Manager
+ *
+ * Manages face descriptors storage and matching for student recognition.
+ * Uses SQLite database to store face profiles with multiple descriptors per student.
+ *
+ * @module faceDatabase
+ */
+
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 const fs = require('fs');
 
+// Face recognition constants
+const FACE_DESCRIPTOR_LENGTH = 128;
+const DEFAULT_MAX_DESCRIPTORS = 10;
+const DEFAULT_RECOGNITION_THRESHOLD = 0.6;
+const CONFIDENCE_NORMALIZATION_FACTOR = 1.5;
+
+// Database configuration
 const USER_DATA_PATH = process.env.USER_DATA_PATH;
 const BASE_DATA_PATH = USER_DATA_PATH || path.join(__dirname, '..');
 const DATA_DIR = path.join(BASE_DATA_PATH, 'data');
 
-// Asegurar que existe la carpeta de datos
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
@@ -16,15 +31,13 @@ const dbPath = process.env.DB_PATH || defaultDbPath;
 
 const db = new sqlite3.Database(dbPath, (err) => {
   if (err) {
-    console.error('❌ Error al abrir la base de datos de rostros:', err);
-  } else {
-    // console.log('✅ Base de datos de rostros conectada en:', dbPath);
+    console.error('Error opening face database:', err);
   }
 });
 
 /**
- * Inicializa la tabla de perfiles faciales
- * Almacena los descriptores faciales de cada alumno para reconocimiento
+ * Initializes the face profiles table
+ * Stores facial descriptors for each student for recognition purposes
  */
 function initFaceDatabase() {
   db.run(`
@@ -37,13 +50,9 @@ function initFaceDatabase() {
       lastUpdated DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY(studentId) REFERENCES students(id)
     )
-  `, (err) => {
-    if (!err) {
-      console.log('📊 Tabla face_profiles inicializada');
-    }
-  });
+  `);
 
-  // Migración: Renombrar columna si existe la versión antigua
+  // Database migration: handle legacy column names
   db.all("PRAGMA table_info(face_profiles)", (err, columns) => {
     if (err) return;
 
@@ -52,80 +61,57 @@ function initFaceDatabase() {
     const hasDescriptorCount = columns.some(col => col.name === 'descriptorCount');
     const hasTrainingImageCount = columns.some(col => col.name === 'trainingImageCount');
 
-    // 1. Añadir faceDescriptors si no existe
     if (!hasFaceDescriptors) {
-      console.log('🔄 Añadiendo columna faceDescriptors...');
       db.run("ALTER TABLE face_profiles ADD COLUMN faceDescriptors TEXT");
     }
 
-    // 2. Añadir descriptorCount si no existe
     if (!hasDescriptorCount) {
-      console.log('🔄 Añadiendo columna descriptorCount...');
       db.run("ALTER TABLE face_profiles ADD COLUMN descriptorCount INTEGER DEFAULT 0", (err) => {
         if (!err && hasTrainingImageCount) {
-          // Copiar datos de la columna antigua si existe
           db.run("UPDATE face_profiles SET descriptorCount = trainingImageCount");
         }
       });
     }
 
-    // 3. Migrar datos de rostro único a array si es necesario
     if (hasFaceDescriptor && !hasFaceDescriptors) {
-      console.log('🔄 Migrando descriptores faciales antiguos...');
       db.all("SELECT studentId, faceDescriptor FROM face_profiles", (err, rows) => {
         if (err || !rows) return;
 
-        const promises = rows.map(row => {
+        const migrationPromises = rows.map(row => {
           return new Promise((resolve) => {
+            if (!row.faceDescriptor) {
+              resolve();
+              return;
+            }
+
             try {
-              if (row.faceDescriptor) {
-                const oldDescriptor = JSON.parse(row.faceDescriptor);
-                const newDescriptors = [oldDescriptor];
-                db.run(
-                  "UPDATE face_profiles SET faceDescriptors = ? WHERE studentId = ?",
-                  [JSON.stringify(newDescriptors), row.studentId],
-                  (err) => resolve()
-                );
-              } else {
-                resolve();
-              }
-            } catch (e) {
-              console.error(`Error migrando rostro de alumno ${row.studentId}:`, e);
+              const oldDescriptor = JSON.parse(row.faceDescriptor);
+              const newDescriptors = [oldDescriptor];
+              db.run(
+                "UPDATE face_profiles SET faceDescriptors = ? WHERE studentId = ?",
+                [JSON.stringify(newDescriptors), row.studentId],
+                () => resolve()
+              );
+            } catch (error) {
               resolve();
             }
           });
         });
 
-        // Una vez migrados los datos, intentar borrar las columnas antiguas
-        Promise.all(promises).then(() => {
-          console.log('✅ Datos migrados. Intentando limpiar columnas antiguas...');
-          // Usamos una sintaxis segura try-catch en SQL si es posible, o simplemente lanzamos el comando
-          // SQLite moderno soporta DROP COLUMN
-          db.run("ALTER TABLE face_profiles DROP COLUMN faceDescriptor", (err) => {
-            if (!err) console.log('🗑️ Columna faceDescriptor eliminada');
-          });
-          db.run("ALTER TABLE face_profiles DROP COLUMN trainingImageCount", (err) => {
-            if (!err) console.log('🗑️ Columna trainingImageCount eliminada');
-          });
+        Promise.all(migrationPromises).then(() => {
+          db.run("ALTER TABLE face_profiles DROP COLUMN faceDescriptor");
+          db.run("ALTER TABLE face_profiles DROP COLUMN trainingImageCount");
         });
       });
     } else if (hasFaceDescriptor) {
-      // Si ya tiene faceDescriptors pero sigue existiendo la antigua
-      console.log('🧹 Limpiando columna residual faceDescriptor...');
-      db.run("ALTER TABLE face_profiles DROP COLUMN faceDescriptor", (err) => {
-        if (!err) console.log('🗑️ Columna faceDescriptor eliminada');
-      });
+      db.run("ALTER TABLE face_profiles DROP COLUMN faceDescriptor");
     }
 
     if (hasTrainingImageCount && hasDescriptorCount) {
-      console.log('🧹 Limpiando columna residual trainingImageCount...');
-      db.run("ALTER TABLE face_profiles DROP COLUMN trainingImageCount", (err) => {
-        if (!err) console.log('🗑️ Columna trainingImageCount eliminada');
-      });
+      db.run("ALTER TABLE face_profiles DROP COLUMN trainingImageCount");
     }
   });
 
-  // Inicializar tabla de logs
   db.run(`
     CREATE TABLE IF NOT EXISTS recognition_logs (
       id INTEGER PRIMARY KEY,
@@ -138,16 +124,16 @@ function initFaceDatabase() {
 }
 
 /**
- * Guardar descriptor facial de un alumno
- * Añade el nuevo descriptor al array existente (máximo 10)
- * @param {number} studentId - ID del alumno
- * @param {Array} faceDescriptor - Array de 128 números (descriptor facial)
- * @param {number} maxDescriptors - Máximo de descriptores a guardar (por defecto 10)
- * @returns {Promise}
+ * Saves a face descriptor for a student
+ * Adds the new descriptor to the existing array (maximum configurable)
+ *
+ * @param {number} studentId - Student ID
+ * @param {Array} faceDescriptor - Array of 128 numbers (face descriptor)
+ * @param {number} maxDescriptors - Maximum descriptors to store
+ * @returns {Promise<Object>} Save result with descriptor count
  */
-function saveFaceProfile(studentId, faceDescriptor, maxDescriptors = 10) {
+function saveFaceProfile(studentId, faceDescriptor, maxDescriptors = DEFAULT_MAX_DESCRIPTORS) {
   return new Promise((resolve, reject) => {
-    // Primero, obtener descriptores existentes
     db.get(
       `SELECT faceDescriptors, descriptorCount FROM face_profiles WHERE studentId = ?`,
       [studentId],
@@ -160,19 +146,15 @@ function saveFaceProfile(studentId, faceDescriptor, maxDescriptors = 10) {
         let descriptors = [];
 
         if (row) {
-          // Ya existe un perfil, añadir al array
           try {
             descriptors = JSON.parse(row.faceDescriptors);
-          } catch (e) {
-            console.error('Error parseando descriptores:', e);
+          } catch (error) {
             descriptors = [];
           }
         }
 
-        // Añadir nuevo descriptor
         descriptors.push(faceDescriptor);
 
-        // Limitar a maxDescriptors (mantener los más recientes)
         if (descriptors.length > maxDescriptors) {
           descriptors = descriptors.slice(-maxDescriptors);
         }
@@ -180,21 +162,21 @@ function saveFaceProfile(studentId, faceDescriptor, maxDescriptors = 10) {
         const descriptorsJson = JSON.stringify(descriptors);
         const count = descriptors.length;
 
-        // Guardar o actualizar
         db.run(
-          `INSERT OR REPLACE INTO face_profiles (studentId, faceDescriptors, descriptorCount, lastUpdated) 
+          `INSERT OR REPLACE INTO face_profiles (studentId, faceDescriptors, descriptorCount, lastUpdated)
            VALUES (?, ?, ?, CURRENT_TIMESTAMP)`,
           [studentId, descriptorsJson, count],
           function (err) {
             if (err) {
               reject(err);
-            } else {
-              resolve({
-                studentId,
-                descriptorCount: count,
-                message: `Perfil facial actualizado (${count} imágenes)`
-              });
+              return;
             }
+
+            resolve({
+              studentId,
+              descriptorCount: count,
+              message: `Face profile updated (${count} descriptors)`
+            });
           }
         );
       }
@@ -203,25 +185,29 @@ function saveFaceProfile(studentId, faceDescriptor, maxDescriptors = 10) {
 }
 
 /**
- * Calcular descriptor promedio de un array de descriptores
- * @param {Array} descriptors - Array de descriptores faciales
- * @returns {Array} - Descriptor promedio
+ * Calculates average descriptor from an array of descriptors
+ *
+ * @param {Array<Array<number>>} descriptors - Array of face descriptors
+ * @returns {Array<number>|null} Average descriptor or null
  */
 function calculateAverageDescriptor(descriptors) {
-  if (!descriptors || descriptors.length === 0) return null;
-  if (descriptors.length === 1) return descriptors[0];
+  if (!descriptors || descriptors.length === 0) {
+    return null;
+  }
 
-  const avgDescriptor = new Array(128).fill(0);
+  if (descriptors.length === 1) {
+    return descriptors[0];
+  }
 
-  // Sumar todos los descriptores
+  const avgDescriptor = new Array(FACE_DESCRIPTOR_LENGTH).fill(0);
+
   descriptors.forEach(descriptor => {
-    for (let i = 0; i < 128; i++) {
+    for (let i = 0; i < FACE_DESCRIPTOR_LENGTH; i++) {
       avgDescriptor[i] += descriptor[i];
     }
   });
 
-  // Dividir por el número de descriptores para obtener el promedio
-  for (let i = 0; i < 128; i++) {
+  for (let i = 0; i < FACE_DESCRIPTOR_LENGTH; i++) {
     avgDescriptor[i] /= descriptors.length;
   }
 
@@ -229,9 +215,10 @@ function calculateAverageDescriptor(descriptors) {
 }
 
 /**
- * Obtener descriptor facial promedio de un alumno
- * @param {number} studentId - ID del alumno
- * @returns {Promise} - Descriptor promedio o null
+ * Gets the average face descriptor for a student
+ *
+ * @param {number} studentId - Student ID
+ * @returns {Promise<Array<number>|null>} Average descriptor or null
  */
 function getFaceProfile(studentId) {
   return new Promise((resolve, reject) => {
@@ -241,16 +228,19 @@ function getFaceProfile(studentId) {
       (err, row) => {
         if (err) {
           reject(err);
-        } else if (row) {
-          try {
-            const descriptors = JSON.parse(row.faceDescriptors);
-            const avgDescriptor = calculateAverageDescriptor(descriptors);
-            resolve(avgDescriptor);
-          } catch (e) {
-            console.error('Error parseando descriptores:', e);
-            resolve(null);
-          }
-        } else {
+          return;
+        }
+
+        if (!row) {
+          resolve(null);
+          return;
+        }
+
+        try {
+          const descriptors = JSON.parse(row.faceDescriptors);
+          const avgDescriptor = calculateAverageDescriptor(descriptors);
+          resolve(avgDescriptor);
+        } catch (error) {
           resolve(null);
         }
       }
@@ -259,8 +249,9 @@ function getFaceProfile(studentId) {
 }
 
 /**
- * Obtener todos los perfiles faciales (promediados) para búsqueda
- * @returns {Promise}
+ * Gets all face profiles (averaged) for matching
+ *
+ * @returns {Promise<Object>} Object mapping studentId to average descriptor
  */
 function getAllFaceProfiles() {
   return new Promise((resolve, reject) => {
@@ -269,32 +260,37 @@ function getAllFaceProfiles() {
       (err, rows) => {
         if (err) {
           reject(err);
-        } else {
-          const profiles = {};
-          rows.forEach(row => {
-            try {
-              const descriptors = JSON.parse(row.faceDescriptors);
-              const avgDescriptor = calculateAverageDescriptor(descriptors);
-              if (avgDescriptor) {
-                profiles[row.studentId] = avgDescriptor;
-              }
-            } catch (e) {
-              console.error(`Error procesando perfil de alumno ${row.studentId}:`, e);
-            }
-          });
-          resolve(profiles);
+          return;
         }
+
+        const profiles = {};
+
+        rows.forEach(row => {
+          try {
+            const descriptors = JSON.parse(row.faceDescriptors);
+            const avgDescriptor = calculateAverageDescriptor(descriptors);
+
+            if (avgDescriptor) {
+              profiles[row.studentId] = avgDescriptor;
+            }
+          } catch (error) {
+            // Skip invalid profiles
+          }
+        });
+
+        resolve(profiles);
       }
     );
   });
 }
 
 /**
- * Calcular distancia euclidiana entre dos descriptores
- * Usada para comparar rostros
- * @param {Array} descriptor1 
- * @param {Array} descriptor2 
- * @returns {number} - Distancia (menor = más similar)
+ * Calculates Euclidean distance between two descriptors
+ * Used for face comparison (lower distance = more similar)
+ *
+ * @param {Array<number>} descriptor1 - First face descriptor
+ * @param {Array<number>} descriptor2 - Second face descriptor
+ * @returns {number} Distance between descriptors
  */
 function calculateDistance(descriptor1, descriptor2) {
   if (!descriptor1 || !descriptor2 || descriptor1.length !== descriptor2.length) {
@@ -302,20 +298,23 @@ function calculateDistance(descriptor1, descriptor2) {
   }
 
   let sumSquaredDiff = 0;
+
   for (let i = 0; i < descriptor1.length; i++) {
     const diff = descriptor1[i] - descriptor2[i];
     sumSquaredDiff += diff * diff;
   }
+
   return Math.sqrt(sumSquaredDiff);
 }
 
 /**
- * Encontrar el alumno más similar basado en descriptor facial
- * @param {Array} faceDescriptor - Descriptor del rostro capturado
- * @param {number} threshold - Distancia máxima para considerar coincidencia (por defecto 0.6)
- * @returns {Promise}
+ * Finds the best matching student based on face descriptor
+ *
+ * @param {Array<number>} faceDescriptor - Captured face descriptor
+ * @param {number} threshold - Maximum distance to consider a match
+ * @returns {Promise<Object|null>} Best match or null if no match found
  */
-async function findMatchingStudent(faceDescriptor, threshold = 0.6) {
+async function findMatchingStudent(faceDescriptor, threshold = DEFAULT_RECOGNITION_THRESHOLD) {
   try {
     const profiles = await getAllFaceProfiles();
 
@@ -330,7 +329,7 @@ async function findMatchingStudent(faceDescriptor, threshold = 0.6) {
         bestMatch = {
           studentId: parseInt(studentId),
           distance: distance,
-          confidence: Math.max(0, 1 - (distance / 1.5)) // Normalizar a 0-1
+          confidence: Math.max(0, 1 - (distance / CONFIDENCE_NORMALIZATION_FACTOR))
         };
       }
     }
@@ -341,21 +340,15 @@ async function findMatchingStudent(faceDescriptor, threshold = 0.6) {
 
     return null;
   } catch (error) {
-    console.error('Error encontrando estudiante:', error);
     return null;
   }
 }
 
 /**
- * Registrar intento de reconocimiento para auditoría
- * @param {number} studentId - ID del alumno (o null si no se reconoció)
- * @param {number} confidence - Nivel de confianza (0-1)
- * @param {string} result - 'success', 'partial_match', 'no_match'
- */
-/**
- * Eliminar perfil facial de un alumno
- * @param {number} studentId - ID del alumno
- * @returns {Promise}
+ * Deletes a face profile for a student
+ *
+ * @param {number} studentId - Student ID
+ * @returns {Promise<Object>} Delete result with number of changes
  */
 function deleteFaceProfile(studentId) {
   return new Promise((resolve, reject) => {
@@ -363,26 +356,31 @@ function deleteFaceProfile(studentId) {
       `DELETE FROM face_profiles WHERE studentId = ?`,
       [studentId],
       function (err) {
-        if (err) reject(err);
-        else resolve({ changes: this.changes });
+        if (err) {
+          reject(err);
+          return;
+        }
+        resolve({ changes: this.changes });
       }
     );
   });
 }
 
 /**
- * Resetear perfil facial (borrar todos los descriptores para re-entrenar desde cero)
- * @param {number} studentId - ID del alumno
- * @returns {Promise}
+ * Resets face profile (deletes all descriptors for retraining)
+ *
+ * @param {number} studentId - Student ID
+ * @returns {Promise<Object>} Reset result
  */
 function resetFaceProfile(studentId) {
   return deleteFaceProfile(studentId);
 }
 
 /**
- * Obtener información del perfil facial (número de descriptores almacenados)
- * @param {number} studentId - ID del alumno
- * @returns {Promise}
+ * Gets face profile information (number of stored descriptors)
+ *
+ * @param {number} studentId - Student ID
+ * @returns {Promise<Object|null>} Profile info or null
  */
 function getFaceProfileInfo(studentId) {
   return new Promise((resolve, reject) => {
@@ -392,27 +390,35 @@ function getFaceProfileInfo(studentId) {
       (err, row) => {
         if (err) {
           reject(err);
-        } else if (row) {
-          resolve({
-            studentId,
-            descriptorCount: row.descriptorCount,
-            lastUpdated: row.lastUpdated
-          });
-        } else {
-          resolve(null);
+          return;
         }
+
+        if (!row) {
+          resolve(null);
+          return;
+        }
+
+        resolve({
+          studentId,
+          descriptorCount: row.descriptorCount,
+          lastUpdated: row.lastUpdated
+        });
       }
     );
   });
 }
 
+/**
+ * Logs a recognition attempt for auditing purposes
+ *
+ * @param {number|null} studentId - Student ID (or null if not recognized)
+ * @param {number} confidence - Confidence level (0-1)
+ * @param {string} result - 'success', 'partial_match', or 'no_match'
+ */
 function logRecognitionAttempt(studentId, confidence, result) {
   db.run(
     `INSERT INTO recognition_logs (studentId, confidence, result) VALUES (?, ?, ?)`,
-    [studentId, confidence, result],
-    (err) => {
-      if (err) console.error('Error registrando intento:', err);
-    }
+    [studentId, confidence, result]
   );
 }
 

@@ -1,3 +1,12 @@
+/**
+ * EduPortfolio Server - Express Server for Educational Portfolio Management
+ *
+ * Main server file handling portfolio management, face recognition,
+ * and encrypted file storage.
+ *
+ * @module server
+ */
+
 const express = require('express');
 const path = require('path');
 const bodyParser = require('body-parser');
@@ -8,96 +17,96 @@ const sqlite3 = require('sqlite3').verbose();
 const multer = require('multer');
 const archiver = require('archiver');
 const archiverZipEncrypted = require('archiver-zip-encrypted');
-const faceDbModule = null; // Se cargará después de asegurar las carpetas
 
-// Registrar formato de archiver con encriptación
 archiver.registerFormat('zip-encrypted', archiverZipEncrypted);
 
-// === SISTEMA DE ENCRIPTACIÓN ===
 const { PasswordManager, DEFAULT_PASSWORD } = require('./password-manager');
 const { PortfolioVault } = require('./portfolio-vault');
 const { DecryptionCache } = require('./decryption-cache');
 
+// Application configuration constants
+const DEFAULT_PORT = 3000;
+const MAX_FILE_SIZE_MB = 50;
+const MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024;
+const MAX_CACHE_SIZE = 150;
+const CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || DEFAULT_PORT;
 const USER_DATA_PATH = process.env.USER_DATA_PATH;
 
-// Configurar multer para subida de archivos
 const upload = multer({
-  storage: multer.memoryStorage(), // Guardar en memoria temporalmente
+  storage: multer.memoryStorage(),
   limits: {
-    fileSize: 50 * 1024 * 1024, // Límite de 50MB
+    fileSize: MAX_FILE_SIZE_BYTES,
   },
 });
 
-// --- CONFIGURACIÓN DE RUTAS DE ALMACENAMIENTO ---
-// Si hay USER_DATA_PATH (Prod), usamos esa ruta. Si no (Dev), usamos la local del proyecto.
+// Storage paths configuration
 const BASE_DATA_PATH = USER_DATA_PATH || path.join(__dirname, '..');
 const DATA_DIR = path.join(BASE_DATA_PATH, 'data');
 const PORTFOLIOS_DIR = path.join(BASE_DATA_PATH, 'portfolios');
-const PUBLIC_DIR = path.join(__dirname, '../public'); // El código estático siempre va con el bundle
+const PUBLIC_DIR = path.join(__dirname, '../public');
 
-// Logging para debug
-console.log('=== CONFIGURACIÓN DE RUTAS ===');
-console.log('USER_DATA_PATH:', USER_DATA_PATH);
-console.log('BASE_DATA_PATH:', BASE_DATA_PATH);
-console.log('DATA_DIR:', DATA_DIR);
-console.log('PORTFOLIOS_DIR:', PORTFOLIOS_DIR);
-console.log('==============================');
+// Ensure data directories exist
+if (!fs.existsSync(DATA_DIR)) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+}
 
-// Asegurar que existan las carpetas de datos
-if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-if (!fs.existsSync(PORTFOLIOS_DIR)) fs.mkdirSync(PORTFOLIOS_DIR, { recursive: true });
+if (!fs.existsSync(PORTFOLIOS_DIR)) {
+  fs.mkdirSync(PORTFOLIOS_DIR, { recursive: true });
+}
 
-// Inicializar sistema de encriptación
+// Initialize encryption system
 const passwordManager = new PasswordManager(DATA_DIR);
 const portfolioVault = new PortfolioVault(PORTFOLIOS_DIR, DATA_DIR);
-const decryptionCache = new DecryptionCache(150, 30 * 60 * 1000); // 150 imágenes, 30 min TTL
+const decryptionCache = new DecryptionCache(MAX_CACHE_SIZE, CACHE_TTL_MS);
 
-// Variable global para almacenar la contraseña actual (solo en memoria)
+// Authentication state (in-memory only)
 let currentPassword = null;
 let isAuthenticated = false;
 
-// Ahora cargamos el módulo de base de datos de rostros una vez las carpetas existen
+// Load face database module after ensuring directories exist
 const faceDb = require('./faceDatabase');
 
 /**
- * Normaliza un nombre para comparaciones flexibles (sin acentos y en minúsculas)
- * @param {string} name 
- * @returns {string}
+ * Normalizes a name for flexible comparison (removes accents and converts to lowercase)
+ *
+ * @param {string} name - Name to normalize
+ * @returns {string} Normalized name
  */
 function normalizeNameForComparison(name) {
-  if (!name) return '';
+  if (!name) {
+    return '';
+  }
   return removeAccents(name).toLowerCase().trim();
 }
 
-// 1. Configuración básica y middlewares
-app.use(cors()); // Keep cors as it was not explicitly removed
-app.use(express.json({ limit: '50mb' })); // Replaces bodyParser.json
-app.use(express.urlencoded({ limit: '50mb', extended: true })); // Add express.urlencoded to replace bodyParser.urlencoded
+// Express middleware configuration
+app.use(cors());
+app.use(express.json({ limit: `${MAX_FILE_SIZE_MB}mb` }));
+app.use(express.urlencoded({ limit: `${MAX_FILE_SIZE_MB}mb`, extended: true }));
 app.use(express.static(PUBLIC_DIR));
 app.use('/_temporal_', express.static(path.join(PORTFOLIOS_DIR, '_temporal_')));
 
-// === MIDDLEWARE DE DESENCRIPTACIÓN ON-DEMAND ===
-// Intercepta solicitudes de imágenes en /portfolios y las desencripta en memoria
+/**
+ * On-demand decryption middleware
+ * Intercepts image requests in /portfolios and decrypts them in memory
+ */
 app.use('/portfolios', async (req, res, next) => {
-  // Solo procesar archivos de imagen (incluyendo archivos .enc)
   const isImage = /\.(jpg|jpeg|png|webp|gif)(\.enc)?$/i.test(req.path);
+
   if (!isImage) {
-    return next(); // Dejar pasar otros archivos
+    return next();
   }
 
-  // Verificar autenticación
   if (!isAuthenticated || !currentPassword) {
-    return res.status(401).json({ error: 'No autenticado. Inicia sesión primero.' });
+    return res.status(401).json({ error: 'Not authenticated. Please login first.' });
   }
 
   try {
-    // Construir ruta absoluta del archivo (sin .enc si lo tiene)
     const cleanPath = req.path.replace(/\.enc$/i, '');
     const filePath = path.join(PORTFOLIOS_DIR, cleanPath);
-
-    // Obtener imagen desencriptada del cache (o desencriptarla si no está)
     const imageBuffer = await decryptionCache.get(filePath, currentPassword);
 
     // Determinar tipo MIME basado en la extensión original (sin .enc)
@@ -1120,14 +1129,15 @@ app.post('/api/evidences/batch/export', async (req, res) => {
           const imageBuffer = await decryptionCache.get(filePath, currentPassword);
 
           // Nombre descriptivo: fecha_estudiante_asignatura_id.jpg
-          const ext = path.extname(row.file_path).replace('.enc', '');
+          // Primero quitar .enc del path, luego extraer la extensión real
+          const cleanPath = row.file_path.replace(/\.enc$/i, '');
+          const ext = path.extname(cleanPath) || '.jpg';
           const date = new Date(row.capture_date).toISOString().split('T')[0];
           const student = (row.student_name || 'SinEstudiante').replace(/\s+/g, '_');
           const subject = (row.subject_name || 'General').replace(/\s+/g, '_');
           const fileName = `${date}_${student}_${subject}_${row.id}${ext}`;
 
           archive.append(imageBuffer, { name: fileName });
-          console.log(`  ✅ Agregado: ${fileName}`);
         } catch (error) {
           console.error(`Error procesando evidencia ${row.id}:`, error);
         }
@@ -1182,12 +1192,8 @@ app.post('/api/evidences/batch/decrypt', async (req, res) => {
           const base64Image = imageBuffer.toString('base64');
 
           // Obtener extensión correctamente (quitar .enc primero)
-          const pathWithoutEnc = row.file_path.replace('.enc', '');
-          let ext = path.extname(pathWithoutEnc).toLowerCase();
-
-          // Si no hay extensión, usar .jpg por defecto
-          if (!ext) ext = '.jpg';
-
+          const cleanPath = row.file_path.replace(/\.enc$/i, '');
+          const ext = path.extname(cleanPath).toLowerCase() || '.jpg';
           const mimeType = ext === '.png' ? 'image/png' : 'image/jpeg';
 
           // Nombre descriptivo

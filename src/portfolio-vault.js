@@ -1,9 +1,9 @@
 /**
- * 🗄️ Portfolio Vault - Gestión del Baúl de Portfolios Encriptados
- * 
- * Módulo responsable de encriptar/desencriptar la carpeta completa de portfolios
- * y gestionar el estado del "baúl" (locked/unlocked).
- * 
+ * Portfolio Vault - Encrypted Portfolio Vault Management
+ *
+ * Module responsible for encrypting/decrypting the complete portfolios folder
+ * and managing vault state (locked/unlocked).
+ *
  * @module portfolio-vault
  * @author Antonio Sánchez León
  */
@@ -12,13 +12,17 @@ const fs = require('fs').promises;
 const path = require('path');
 const crypto = require('./crypto-manager');
 
+// Supported image file extensions
+const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png'];
+const TEMPORAL_FOLDER_NAME = '_temporal_';
+
 /**
- * Clase para gestionar el baúl de portfolios encriptados
+ * Class for managing the encrypted portfolios vault
  */
 class PortfolioVault {
     /**
-     * @param {string} portfoliosDir - Directorio de portfolios
-     * @param {string} dataDir - Directorio de datos (para archivo de estado)
+     * @param {string} portfoliosDir - Portfolios directory
+     * @param {string} dataDir - Data directory (for state file)
      */
     constructor(portfoliosDir, dataDir) {
         this.portfoliosDir = portfoliosDir;
@@ -27,8 +31,8 @@ class PortfolioVault {
     }
 
     /**
-     * Verifica si el baúl está bloqueado (archivos encriptados)
-     * 
+     * Checks if the vault is locked (files encrypted)
+     *
      * @returns {Promise<boolean>}
      */
     async isLocked() {
@@ -37,15 +41,14 @@ class PortfolioVault {
             const { locked } = JSON.parse(state);
             return locked === true;
         } catch {
-            // Si no existe el archivo de estado, asumimos que está desbloqueado
             return false;
         }
     }
 
     /**
-     * Establece el estado del baúl
-     * 
-     * @param {boolean} locked - true si está bloqueado, false si está desbloqueado
+     * Sets the vault lock state
+     *
+     * @param {boolean} locked - true if locked, false if unlocked
      * @returns {Promise<void>}
      */
     async setLockState(locked) {
@@ -54,11 +57,11 @@ class PortfolioVault {
     }
 
     /**
-     * Obtiene todos los archivos de imagen en la carpeta de portfolios
-     * 
-     * @param {string} dir - Directorio a escanear
-     * @param {string[]} fileList - Lista acumulativa de archivos
-     * @returns {Promise<string[]>} Lista de rutas absolutas de archivos
+     * Gets all image files in the portfolios folder
+     *
+     * @param {string} dir - Directory to scan
+     * @param {string[]} fileList - Accumulative file list
+     * @returns {Promise<string[]>} List of absolute file paths
      */
     async getAllImageFiles(dir = this.portfoliosDir, fileList = []) {
         const entries = await fs.readdir(dir, { withFileTypes: true });
@@ -67,15 +70,15 @@ class PortfolioVault {
             const fullPath = path.join(dir, entry.name);
 
             if (entry.isDirectory()) {
-                // Ignorar carpeta temporal
-                if (entry.name === '_temporal_') continue;
-
-                // Recursión en subdirectorios
+                if (entry.name === TEMPORAL_FOLDER_NAME) {
+                    continue;
+                }
                 await this.getAllImageFiles(fullPath, fileList);
             } else if (entry.isFile()) {
-                // Solo procesar archivos de imagen (.jpg, .png, .jpeg)
                 const ext = path.extname(entry.name).toLowerCase();
-                if (['.jpg', '.jpeg', '.png'].includes(ext) || ext === crypto.ENCRYPTED_EXTENSION) {
+                const isImageFile = IMAGE_EXTENSIONS.includes(ext) || ext === crypto.ENCRYPTED_EXTENSION;
+
+                if (isImageFile) {
                     fileList.push(fullPath);
                 }
             }
@@ -85,94 +88,79 @@ class PortfolioVault {
     }
 
     /**
-     * Bloquea el baúl encriptando todos los archivos de portfolios
-     * 
-     * @param {string} password - Contraseña para encriptar
+     * Locks the vault by encrypting all portfolio files
+     *
+     * @param {string} password - Password for encryption
      * @returns {Promise<{success: boolean, filesEncrypted: number, errors: string[]}>}
      */
     async lockVault(password) {
-        const locked = await this.isLocked();
-        if (locked) {
-            return { success: false, filesEncrypted: 0, errors: ['El baúl ya está bloqueado'] };
+        if (await this.isLocked()) {
+            return { success: false, filesEncrypted: 0, errors: ['Vault is already locked'] };
         }
-
-        console.log('🔒 Bloqueando baúl de portfolios...');
 
         const files = await this.getAllImageFiles();
         const errors = [];
         let filesEncrypted = 0;
 
         for (const filePath of files) {
-            // Saltar archivos ya encriptados
-            if (crypto.isEncrypted(filePath)) continue;
+            if (crypto.isEncrypted(filePath)) {
+                continue;
+            }
 
             try {
                 await crypto.encryptFile(filePath, password);
                 filesEncrypted++;
-                console.log(`  ✓ Encriptado: ${path.basename(filePath)}`);
             } catch (error) {
-                errors.push(`Error encriptando ${filePath}: ${error.message}`);
-                console.error(`  ✗ Error: ${path.basename(filePath)}`);
+                errors.push(`Error encrypting ${filePath}: ${error.message}`);
             }
         }
 
         await this.setLockState(true);
-        console.log(`🔒 Baúl bloqueado. ${filesEncrypted} archivos encriptados.`);
 
         return { success: true, filesEncrypted, errors };
     }
 
     /**
-     * Desbloquea el baúl desencriptando todos los archivos de portfolios
-     * 
-     * @param {string} password - Contraseña para desencriptar
+     * Unlocks the vault by decrypting all portfolio files
+     *
+     * @param {string} password - Password for decryption
      * @returns {Promise<{success: boolean, filesDecrypted: number, errors: string[]}>}
      */
     async unlockVault(password) {
-        console.log('🔓 Desbloqueando baúl de portfolios...');
-
         const files = await this.getAllImageFiles();
         const errors = [];
         let filesDecrypted = 0;
 
         for (const filePath of files) {
-            // Solo procesar archivos encriptados
-            if (!crypto.isEncrypted(filePath)) continue;
+            if (!crypto.isEncrypted(filePath)) {
+                continue;
+            }
 
             try {
                 await crypto.decryptFile(filePath, password);
                 filesDecrypted++;
-                console.log(`  ✓ Desencriptado: ${path.basename(filePath)}`);
             } catch (error) {
-                errors.push(`Error desencriptando ${filePath}: ${error.message}`);
-                console.error(`  ✗ Error: ${path.basename(filePath)}`);
+                errors.push(`Error decrypting ${filePath}: ${error.message}`);
             }
         }
 
-        // Solo marcar como desbloqueado si no hubo errores críticos
         if (errors.length === 0) {
             await this.setLockState(false);
-            console.log(`🔓 Baúl desbloqueado. ${filesDecrypted} archivos desencriptados.`);
             return { success: true, filesDecrypted, errors };
-        } else {
-            console.error(`❌ Error desbloqueando baúl. Contraseña incorrecta o archivos corruptos.`);
-            return { success: false, filesDecrypted, errors };
         }
+
+        return { success: false, filesDecrypted, errors };
     }
 
     /**
-     * Encripta un archivo nuevo que se acaba de guardar
-     * (Solo si el baúl está bloqueado)
-     * 
-     * @param {string} filePath - Ruta del archivo a encriptar
-     * @param {string} password - Contraseña para encriptar
+     * Encrypts a newly saved file (only if vault is locked)
+     *
+     * @param {string} filePath - Path to file to encrypt
+     * @param {string} password - Password for encryption
      * @returns {Promise<{success: boolean, encrypted: boolean}>}
      */
     async encryptNewFile(filePath, password) {
-        const locked = await this.isLocked();
-
-        // Si el baúl está desbloqueado, no encriptar archivos nuevos
-        if (!locked) {
+        if (!await this.isLocked()) {
             return { success: true, encrypted: false };
         }
 
@@ -180,14 +168,13 @@ class PortfolioVault {
             await crypto.encryptFile(filePath, password);
             return { success: true, encrypted: true };
         } catch (error) {
-            console.error(`Error encriptando archivo nuevo: ${error.message}`);
             return { success: false, encrypted: false };
         }
     }
 
     /**
-     * Obtiene estadísticas del baúl
-     * 
+     * Gets vault statistics
+     *
      * @returns {Promise<{locked: boolean, totalFiles: number, encryptedFiles: number, unencryptedFiles: number}>}
      */
     async getStats() {

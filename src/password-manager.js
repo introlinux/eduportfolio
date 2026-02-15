@@ -1,9 +1,9 @@
 /**
- * 🔑 Password Manager - Gestión de Contraseña del Maestro
- * 
- * Módulo responsable de almacenar y verificar la contraseña del maestro
- * de forma segura usando hashing PBKDF2.
- * 
+ * Password Manager - Master Password Management
+ *
+ * Module responsible for securely storing and verifying the master password
+ * using PBKDF2 hashing algorithm.
+ *
  * @module password-manager
  * @author Antonio Sánchez León
  */
@@ -12,20 +12,21 @@ const crypto = require('crypto');
 const fs = require('fs').promises;
 const path = require('path');
 
-// === CONSTANTES DE CONFIGURACIÓN ===
+// Security configuration constants
 const PBKDF2_ITERATIONS = 100000;
 const HASH_LENGTH = 64; // 512 bits
 const SALT_LENGTH = 32; // 256 bits
 const PBKDF2_DIGEST = 'sha512';
+const PASSWORD_FILE_PERMISSIONS = 0o600; // Owner read/write only
 
-// Contraseña predeterminada
+// Default password
 const DEFAULT_PASSWORD = 'eduportfolio';
 
 /**
- * Genera un hash seguro de una contraseña usando PBKDF2
- * 
- * @param {string} password - Contraseña a hashear
- * @param {Buffer} [salt] - Salt opcional (se genera si no se proporciona)
+ * Generates a secure hash of a password using PBKDF2
+ *
+ * @param {string} password - Password to hash
+ * @param {Buffer} [salt] - Optional salt (generated if not provided)
  * @returns {Promise<{hash: string, salt: string}>}
  */
 function hashPassword(password, salt = null) {
@@ -39,24 +40,26 @@ function hashPassword(password, salt = null) {
             HASH_LENGTH,
             PBKDF2_DIGEST,
             (err, derivedKey) => {
-                if (err) reject(err);
-                else {
-                    resolve({
-                        hash: derivedKey.toString('hex'),
-                        salt: passwordSalt.toString('hex')
-                    });
+                if (err) {
+                    reject(err);
+                    return;
                 }
+
+                resolve({
+                    hash: derivedKey.toString('hex'),
+                    salt: passwordSalt.toString('hex')
+                });
             }
         );
     });
 }
 
 /**
- * Clase para gestionar la contraseña del maestro
+ * Class for managing the master password
  */
 class PasswordManager {
     /**
-     * @param {string} dataDir - Directorio donde se almacena el archivo de contraseña
+     * @param {string} dataDir - Directory where the password file is stored
      */
     constructor(dataDir) {
         this.dataDir = dataDir;
@@ -64,8 +67,8 @@ class PasswordManager {
     }
 
     /**
-     * Verifica si existe una contraseña configurada
-     * 
+     * Checks if a password is configured
+     *
      * @returns {Promise<boolean>}
      */
     async hasPassword() {
@@ -78,35 +81,33 @@ class PasswordManager {
     }
 
     /**
-     * Configura la contraseña inicial (solo si no existe)
-     * 
-     * @param {string} password - Nueva contraseña
+     * Sets the initial password (only if none exists)
+     *
+     * @param {string} password - New password
      * @returns {Promise<{success: boolean, message: string}>}
      */
     async setPassword(password) {
-        const exists = await this.hasPassword();
-        if (exists) {
-            return { success: false, message: 'Ya existe una contraseña configurada' };
+        if (await this.hasPassword()) {
+            return { success: false, message: 'Password already configured' };
         }
 
         const { hash, salt } = await hashPassword(password);
         const data = JSON.stringify({ hash, salt }, null, 2);
 
-        await fs.writeFile(this.passwordFilePath, data, { mode: 0o600 }); // Solo lectura/escritura para el propietario
+        await fs.writeFile(this.passwordFilePath, data, { mode: PASSWORD_FILE_PERMISSIONS });
 
-        return { success: true, message: 'Contraseña configurada correctamente' };
+        return { success: true, message: 'Password configured successfully' };
     }
 
     /**
-     * Verifica si una contraseña es correcta
-     * 
-     * @param {string} password - Contraseña a verificar
+     * Verifies if a password is correct
+     *
+     * @param {string} password - Password to verify
      * @returns {Promise<boolean>}
      */
     async verifyPassword(password) {
         try {
-            const exists = await this.hasPassword();
-            if (!exists) {
+            if (!await this.hasPassword()) {
                 return false;
             }
 
@@ -117,41 +118,37 @@ class PasswordManager {
 
             return hash === storedHash;
         } catch (error) {
-            console.error('Error verificando contraseña:', error);
             return false;
         }
     }
 
     /**
-     * Cambia la contraseña existente
-     * 
-     * @param {string} oldPassword - Contraseña actual
-     * @param {string} newPassword - Nueva contraseña
+     * Changes the existing password
+     *
+     * @param {string} oldPassword - Current password
+     * @param {string} newPassword - New password
      * @returns {Promise<{success: boolean, message: string}>}
      */
     async changePassword(oldPassword, newPassword) {
-        const isValid = await this.verifyPassword(oldPassword);
-        if (!isValid) {
-            return { success: false, message: 'Contraseña actual incorrecta' };
+        if (!await this.verifyPassword(oldPassword)) {
+            return { success: false, message: 'Current password is incorrect' };
         }
 
         const { hash, salt } = await hashPassword(newPassword);
         const data = JSON.stringify({ hash, salt }, null, 2);
 
-        await fs.writeFile(this.passwordFilePath, data, { mode: 0o600 });
+        await fs.writeFile(this.passwordFilePath, data, { mode: PASSWORD_FILE_PERMISSIONS });
 
-        return { success: true, message: 'Contraseña cambiada correctamente' };
+        return { success: true, message: 'Password changed successfully' };
     }
 
     /**
-     * Inicializa la contraseña predeterminada si no existe
-     * 
+     * Initializes the default password if none exists
+     *
      * @returns {Promise<{initialized: boolean, isDefault: boolean}>}
      */
     async initializeDefaultPassword() {
-        const exists = await this.hasPassword();
-
-        if (!exists) {
+        if (!await this.hasPassword()) {
             await this.setPassword(DEFAULT_PASSWORD);
             return { initialized: true, isDefault: true };
         }
@@ -160,15 +157,15 @@ class PasswordManager {
     }
 
     /**
-     * Resetea la contraseña a la predeterminada (solo para desarrollo/testing)
-     * 
+     * Resets password to default (development/testing only)
+     *
      * @returns {Promise<{success: boolean}>}
      */
     async resetToDefault() {
         try {
             await fs.unlink(this.passwordFilePath);
         } catch {
-            // Ignorar si no existe
+            // Ignore if file doesn't exist
         }
 
         await this.setPassword(DEFAULT_PASSWORD);

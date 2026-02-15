@@ -3,36 +3,55 @@ const path = require('path');
 const { fork } = require('child_process');
 const net = require('net');
 
+// Configuration constants
+const DEFAULT_PORT = 3000;
+const SERVER_STARTUP_DELAY_MS = 3000;
+const WINDOW_WIDTH = 1280;
+const WINDOW_HEIGHT = 720;
+
 let mainWindow;
 let serverProcess;
 
-function getAvailablePort(startingAt) {
-    function getNextAvailablePort(currentPort, cb) {
-        const server = net.createServer();
-        server.listen(currentPort, () => {
-            server.once('close', () => {
-                cb(currentPort);
-            });
-            server.close();
-        });
-        server.on('error', () => {
-            getNextAvailablePort(++currentPort, cb);
-        });
-    }
+/**
+ * Recursively finds the next available port starting from a given port number
+ * @param {number} currentPort - The port number to check
+ * @param {Function} callback - Callback function that receives the available port
+ */
+function findNextAvailablePort(currentPort, callback) {
+    const server = net.createServer();
 
-    return new Promise(resolve => {
-        getNextAvailablePort(startingAt, resolve);
+    server.listen(currentPort, () => {
+        server.once('close', () => {
+            callback(currentPort);
+        });
+        server.close();
+    });
+
+    server.on('error', () => {
+        findNextAvailablePort(++currentPort, callback);
     });
 }
 
+/**
+ * Gets an available port starting from the specified port number
+ * @param {number} startingPort - The initial port number to check
+ * @returns {Promise<number>} Promise that resolves with an available port number
+ */
+function getAvailablePort(startingPort) {
+    return new Promise(resolve => {
+        findNextAvailablePort(startingPort, resolve);
+    });
+}
+
+/**
+ * Starts the Express server in a separate process
+ * @returns {Promise<number>} Promise that resolves with the server port number
+ */
 async function startServer() {
-    const port = await getAvailablePort(3000);
+    const port = await getAvailablePort(DEFAULT_PORT);
     const userDataPath = app.getPath('userData');
 
-    console.log(`Starting server on port ${port} with data path: ${userDataPath}`);
-
-    // Iniciamos el servidor Express en un proceso separado
-    serverProcess = fork(path.join(__dirname, 'server.js'), [], {
+    const serverConfig = {
         env: {
             ...process.env,
             NODE_ENV: 'production',
@@ -40,62 +59,66 @@ async function startServer() {
             USER_DATA_PATH: userDataPath
         },
         silent: false
-    });
+    };
 
-    serverProcess.on('message', (msg) => {
-        console.log('Mensaje del servidor:', msg);
-    });
+    serverProcess = fork(path.join(__dirname, 'server.js'), [], serverConfig);
 
-    serverProcess.on('error', (err) => {
-        console.error('Error en el proceso del servidor:', err);
+    serverProcess.on('error', (error) => {
+        console.error('Server process error:', error);
     });
 
     return port;
 }
 
+/**
+ * Creates the main browser window and loads the application
+ */
 async function createWindow() {
     const port = await startServer();
 
-    // Ocultar la barra de menú
     Menu.setApplicationMenu(null);
 
-    mainWindow = new BrowserWindow({
-        width: 1280,
-        height: 720,
+    const windowConfig = {
+        width: WINDOW_WIDTH,
+        height: WINDOW_HEIGHT,
         webPreferences: {
             nodeIntegration: false,
             contextIsolation: true,
         },
         title: "EduPortfolio",
         autoHideMenuBar: true,
-        // icon: path.join(__dirname, '../public/favicon.ico') // Añadir icono si existe
-    });
+    };
 
-    // El servidor tarda un momento en arrancar
+    mainWindow = new BrowserWindow(windowConfig);
+
     setTimeout(() => {
         mainWindow.loadURL(`http://localhost:${port}/login.html`);
-    }, 3000);
+    }, SERVER_STARTUP_DELAY_MS);
 
-    // Modo pantalla completa para la cabina (opcional, se puede activar con F11)
-    // mainWindow.setFullScreen(true);
-
-    mainWindow.on('closed', function () {
+    mainWindow.on('closed', () => {
         mainWindow = null;
     });
 }
 
-app.on('ready', () => {
-    createWindow();
-});
+/**
+ * Cleans up server process before application quits
+ */
+function cleanupServerProcess() {
+    if (serverProcess) {
+        serverProcess.kill();
+    }
+}
 
-app.on('window-all-closed', function () {
+app.on('ready', createWindow);
+
+app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') {
-        if (serverProcess) serverProcess.kill();
+        cleanupServerProcess();
         app.quit();
     }
 });
 
-app.on('activate', function () {
+app.on('activate', () => {
     if (mainWindow === null) {
         createWindow();
     }
