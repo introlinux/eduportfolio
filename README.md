@@ -118,17 +118,23 @@ eduportfolio-web/
 
 ## 🚀 Instalación y Uso
 
-### 1. Requisitos Previos
+### 1. Descarga de Binarios Ejecutables (Opción Recomendada)
+
+Si prefieres utilizar la aplicación sin necesidad de compilar el código fuente, puedes descargar los binarios ejecutables precompilados desde el siguiente enlace:
+
+**📥 [Descargar EduPortfolio (Versión Escritorio)](https://drive.google.com/drive/folders/1BJdJ9gIO39UN28UjLXMRDaEhdnPvmFJZ?usp=drive_link)**
+
+### 2. Requisitos Previos (Para Compilar desde Código Fuente)
 - **Node.js**: v20.x LTS o superior.
 - **npm**: v10.x o superior.
 
-### 2. Instalación
+### 3. Instalación
 ```bash
 # Instalar dependencias
 npm install
 ```
 
-### 3. Ejecución
+### 4. Ejecución
 
 #### Modo Desarrollo (Navegador)
 ```bash
@@ -189,7 +195,7 @@ Este proyecto incluye un archivo [AGENTS.md](file:///Users/minino/Downloads/edup
 
 ---
 
-## � Autor
+##   Autor
 
 **Antonio Sánchez León**
 - 📧 Email: [introlinux@gmail.com](mailto:introlinux@gmail.com)
@@ -197,7 +203,7 @@ Este proyecto incluye un archivo [AGENTS.md](file:///Users/minino/Downloads/edup
 
 ---
 
-## �📄 Licencia
+##  📄 Licencia
 
 Este proyecto está bajo la licencia **MIT**. Consulte el archivo `LICENSE` para más detalles.
 
