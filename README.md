@@ -192,6 +192,35 @@ npm run electron:build:linux
 npm run electron:build:all
 ```
 
+### 6. Testing (TFM - Tests Unitarios e Integración)
+
+```bash
+# Ejecutar todos los tests
+npm test
+
+# Con reporte de cobertura
+npm test -- --coverage
+
+# Tests específicos
+npm test -- tests/unit/password-manager.test.js
+npm test -- tests/unit/crypto-manager.test.js
+
+# Watch mode (desarrollo)
+npm test -- --watch
+```
+
+**📚 Documentación de Testing**:
+- [**TESTING_SUMMARY.md**](TESTING_SUMMARY.md) - Resumen ejecutivo (⭐ Empezar aquí)
+- [**TESTING_GUIDE.md**](docs/TESTING_GUIDE.md) - Guía completa de testing
+- [**TEST_COVERAGE_ANALYSIS.md**](docs/TEST_COVERAGE_ANALYSIS.md) - Análisis de cobertura
+
+**Estado de Tests** (TFM - Febrero 2026):
+- ✅ **234 tests** implementados
+- ✅ **80% cobertura** global
+- ✅ **5 módulos críticos** con 85%+ cobertura
+- ✅ Tests siguiendo **Ciclo TDD** y **Pirámide de Testing**
+- ✅ Cumple estándares **AGENTS.md** del proyecto
+
 ---
 
 ## 🔌 API REST
