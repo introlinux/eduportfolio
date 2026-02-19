@@ -1501,11 +1501,43 @@ async function updateGallery() {
     captures.forEach((cap, index) => {
       const card = document.createElement('div');
       card.className = 'gallery-card';
-      const imgUrl = `/portfolios/${cap.imagePath}`;
+      const fileUrl = `/portfolios/${cap.imagePath}`;
       const studentNameDisplay = cap.studentName || (studentId && studentId !== 'Todos' ? singleStudentName : 'Sin asignar');
+      const durationStr = cap.duration ? formatDuration(cap.duration) : '';
+
+      // Construir el área de media según el tipo de evidencia
+      let mediaHtml;
+      if (cap.type === 'VID') {
+        const thumbUrl = cap.thumbnailPath ? `/portfolios/${cap.thumbnailPath}` : null;
+        mediaHtml = `
+          <div class="gallery-card-media">
+            ${thumbUrl
+            ? `<img src="${thumbUrl}" alt="Miniatura" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';">`
+            : ''
+          }
+            <div class="gallery-card-placeholder video-placeholder" ${thumbUrl ? 'style="display:none;"' : ''}>🎬</div>
+            <div class="gallery-card-overlay">▶</div>
+            ${durationStr ? `<span class="gallery-card-duration">${durationStr}</span>` : ''}
+          </div>`;
+      } else if (cap.type === 'AUD') {
+        const thumbUrl = cap.thumbnailPath ? `/portfolios/${cap.thumbnailPath}` : null;
+        mediaHtml = `
+          <div class="gallery-card-media">
+            ${thumbUrl
+            ? `<img src="${thumbUrl}" alt="Carátula" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';">`
+            : ''
+          }
+            <div class="gallery-card-placeholder audio-placeholder" ${thumbUrl ? 'style="display:none;"' : ''}>🎤</div>
+            <div class="gallery-card-overlay audio-overlay">🎵</div>
+            ${durationStr ? `<span class="gallery-card-duration">${durationStr}</span>` : ''}
+          </div>`;
+      } else {
+        // IMG u otro tipo
+        mediaHtml = `<img src="${fileUrl}" alt="Trabajo">`;
+      }
 
       card.innerHTML = `
-        <img src="${imgUrl}" alt="Trabajo">
+        ${mediaHtml}
         <div class="gallery-card-info">
           <div class="gallery-card-student">${studentNameDisplay}</div>
           <div class="gallery-card-subject">${cap.subject || 'General'}</div>
@@ -1549,31 +1581,78 @@ function openLightbox(index) {
   const cap = currentGalleryCaptures[index];
   const modal = document.getElementById('lightbox');
   const img = document.getElementById('lightboxImg');
+  const video = document.getElementById('lightboxVideo');
+  const audioContainer = document.getElementById('lightboxAudioContainer');
+  const audio = document.getElementById('lightboxAudio');
+  const audioCover = document.getElementById('lightboxAudioCover');
+  const audioPlaceholder = document.getElementById('lightboxAudioPlaceholder');
   const captionEl = document.getElementById('lightboxCaption');
 
-  const imgUrl = `/portfolios/${cap.imagePath}`;
-  const caption = `${cap.subject} - ${new Date(cap.timestamp).toLocaleDateString()}`;
+  const fileUrl = `/portfolios/${cap.imagePath}`;
+  const caption = `${cap.subject || 'General'} - ${new Date(cap.timestamp).toLocaleDateString()}`;
+
+  // Detener cualquier media en reproducción y limpiar fuentes anteriores
+  if (video) { video.pause(); video.innerHTML = ''; video.removeAttribute('src'); video.load(); }
+  if (audio) { audio.pause(); audio.innerHTML = ''; audio.removeAttribute('src'); audio.load(); }
+
+  // Ocultar todos los elementos de media
+  img.style.display = 'none';
+  if (video) video.style.display = 'none';
+  if (audioContainer) audioContainer.style.display = 'none';
 
   modal.style.display = 'flex';
-  img.src = imgUrl;
   captionEl.textContent = caption;
 
-  // Reset zoom state
-  resetLightboxZoom();
+  if (cap.type === 'VID') {
+    // Mostrar reproductor de video con <source> explícito para compatibilidad Firefox
+    video.style.display = 'block';
+    const vidSrc = document.createElement('source');
+    vidSrc.src = fileUrl;
+    vidSrc.type = getMediaMimeType(fileUrl);
+    video.appendChild(vidSrc);
+    video.load();
+  } else if (cap.type === 'AUD') {
+    // Mostrar reproductor de audio con <source> explícito para compatibilidad Firefox
+    audioContainer.style.display = 'flex';
+    const audSrc = document.createElement('source');
+    audSrc.src = fileUrl;
+    audSrc.type = getMediaMimeType(fileUrl);
+    audio.appendChild(audSrc);
+    audio.load();
+    if (cap.thumbnailPath) {
+      audioCover.src = `/portfolios/${cap.thumbnailPath}`;
+      audioCover.style.display = 'block';
+      if (audioPlaceholder) audioPlaceholder.style.display = 'none';
+      audioCover.onerror = () => {
+        audioCover.style.display = 'none';
+        if (audioPlaceholder) audioPlaceholder.style.display = 'block';
+      };
+    } else {
+      audioCover.style.display = 'none';
+      if (audioPlaceholder) audioPlaceholder.style.display = 'block';
+    }
+  } else {
+    // Imagen (comportamiento actual)
+    img.style.display = 'block';
+    img.src = fileUrl;
 
-  // Remove old event listeners to avoid duplicates
-  img.removeEventListener('dblclick', handleLightboxZoom);
-  img.removeEventListener('mousedown', handlePanStart);
-  img.removeEventListener('mousemove', handlePanMove);
-  img.removeEventListener('mouseup', handlePanEnd);
-  img.removeEventListener('mouseleave', handlePanEnd);
+    // Reset zoom state
+    resetLightboxZoom();
 
-  // Add event listeners
-  img.addEventListener('dblclick', handleLightboxZoom);
-  img.addEventListener('mousedown', handlePanStart);
-  img.addEventListener('mousemove', handlePanMove);
-  img.addEventListener('mouseup', handlePanEnd);
-  img.addEventListener('mouseleave', handlePanEnd);
+    // Remove old event listeners to avoid duplicates
+    img.removeEventListener('dblclick', handleLightboxZoom);
+    img.removeEventListener('mousedown', handlePanStart);
+    img.removeEventListener('mousemove', handlePanMove);
+    img.removeEventListener('mouseup', handlePanEnd);
+    img.removeEventListener('mouseleave', handlePanEnd);
+
+    // Add event listeners
+    img.addEventListener('dblclick', handleLightboxZoom);
+    img.addEventListener('mousedown', handlePanStart);
+    img.addEventListener('mousemove', handlePanMove);
+    img.addEventListener('mouseup', handlePanEnd);
+    img.addEventListener('mouseleave', handlePanEnd);
+  }
 }
 
 function handleLightboxZoom(e) {
@@ -1704,6 +1783,12 @@ function resetLightboxZoom() {
 }
 
 function closeLightbox() {
+  // Detener reproducción de video/audio al cerrar
+  const video = document.getElementById('lightboxVideo');
+  const audio = document.getElementById('lightboxAudio');
+  if (video) { video.pause(); video.innerHTML = ''; video.removeAttribute('src'); video.load(); }
+  if (audio) { audio.pause(); audio.innerHTML = ''; audio.removeAttribute('src'); audio.load(); }
+
   document.getElementById('lightbox').style.display = 'none';
   currentLightboxIndex = -1;
   resetLightboxZoom();
@@ -1795,6 +1880,26 @@ function changeQuality() {
 
   localStorage.setItem('cameraQuality', quality);
   showNotification(`Calidad de captura actualizada: ${select.options[select.selectedIndex].text}`, 'success');
+}
+
+function formatDuration(seconds) {
+  const mins = Math.floor(seconds / 60);
+  const secs = seconds % 60;
+  return `${mins}:${secs.toString().padStart(2, '0')}`;
+}
+
+// Devuelve el MIME type correcto a partir de la URL (ignorando la extensión .enc)
+function getMediaMimeType(url) {
+  const ext = url.replace(/\.enc$/i, '').split('.').pop().toLowerCase();
+  const types = {
+    opus: 'audio/ogg; codecs=opus',   // Especificar codec para ayudar a Firefox
+    ogg: 'audio/ogg',
+    mp3: 'audio/mpeg',
+    wav: 'audio/wav',
+    mp4: 'video/mp4',
+    webm: 'video/webm',
+  };
+  return types[ext] || '';
 }
 
 function formatBytes(bytes, decimals = 2) {

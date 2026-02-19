@@ -82,6 +82,103 @@ function normalizeNameForComparison(name) {
   return removeAccents(name).toLowerCase().trim();
 }
 
+/**
+ * Ogg CRC-32 table for checksum calculation (Ogg-CRC-32)
+ * Polynomial: 0x04C11DB7
+ */
+const OGG_CRC32_TABLE = new Uint32Array(256);
+for (let i = 0; i < 256; i++) {
+  let r = i << 24;
+  for (let j = 0; j < 8; j++) {
+    r = (r & 0x80000000) ? (r << 1) ^ 0x04C11DB7 : (r << 1);
+  }
+  OGG_CRC32_TABLE[i] = r & 0xFFFFFFFF;
+}
+
+/**
+ * Calculates Ogg Checksum for a buffer
+ */
+function calculateOggCrc(buffer) {
+  let crc = 0;
+  for (let i = 0; i < buffer.length; i++) {
+    crc = (crc << 8) ^ OGG_CRC32_TABLE[((crc >>> 24) ^ buffer[i]) & 0xFF];
+  }
+  return crc >>> 0;
+}
+
+/**
+ * Repairs an Opus/Ogg buffer by adding the missing EOS (End Of Stream) bit
+ * to the last page, enabling Firefox compatibility.
+ *
+ * @param {Buffer} buffer - Decrypted audio buffer
+ * @returns {Buffer} Modified buffer
+ */
+function repairOpusBuffer(buffer) {
+  if (buffer.length < 27) {
+    return buffer;
+  }
+
+  // Verify Ogg magic header
+  if (buffer.slice(0, 4).toString() !== 'OggS') {
+    return buffer;
+  }
+
+  let offset = 0;
+  let lastPageOffset = -1;
+
+  // Scan for the last Ogg page
+  while (offset < buffer.length) {
+    if (buffer.slice(offset, offset + 4).toString() !== 'OggS') {
+      break;
+    }
+    lastPageOffset = offset;
+
+    if (offset + 26 >= buffer.length) {
+      break;
+    }
+    const segmentsCount = buffer[offset + 26];
+    let packetSize = 0;
+    if (offset + 27 + segmentsCount > buffer.length) {
+      break;
+    }
+
+    for (let i = 0; i < segmentsCount; i++) {
+      packetSize += buffer[offset + 27 + i];
+    }
+    offset += 27 + segmentsCount + packetSize;
+  }
+
+  if (lastPageOffset !== -1) {
+    // Check if EOS bit (0x04) is already set
+    if (!(buffer[lastPageOffset + 5] & 0x04)) {
+      // Create a writable copy of the buffer to modify it
+      const repairedBuffer = Buffer.from(buffer);
+
+      // 1. Set EOS bit
+      repairedBuffer[lastPageOffset + 5] |= 0x04;
+
+      // 2. Clear checksum for recalculation
+      repairedBuffer.writeUInt32LE(0, lastPageOffset + 22);
+
+      // 3. Find current page size
+      const segmentsCount = repairedBuffer[lastPageOffset + 26];
+      let packetSize = 0;
+      for (let i = 0; i < segmentsCount; i++) {
+        packetSize += repairedBuffer[lastPageOffset + 27 + i];
+      }
+      const pageSize = 27 + segmentsCount + packetSize;
+
+      // 4. Recalculate Ogg CRC-32
+      const newCrc = calculateOggCrc(repairedBuffer.slice(lastPageOffset, lastPageOffset + pageSize));
+      repairedBuffer.writeUInt32LE(newCrc, lastPageOffset + 22);
+
+      return repairedBuffer;
+    }
+  }
+
+  return buffer;
+}
+
 // Express middleware configuration
 app.use(cors());
 app.use(express.json({ limit: `${MAX_FILE_SIZE_MB}mb` }));
@@ -95,8 +192,10 @@ app.use('/_temporal_', express.static(path.join(PORTFOLIOS_DIR, '_temporal_')));
  */
 app.use('/portfolios', async (req, res, next) => {
   const isImage = /\.(jpg|jpeg|png|webp|gif)(\.enc)?$/i.test(req.path);
+  const isVideo = /\.(mp4|webm)(\.enc)?$/i.test(req.path);
+  const isAudio = /\.(opus|ogg|mp3|wav)(\.enc)?$/i.test(req.path);
 
-  if (!isImage) {
+  if (!isImage && !isVideo && !isAudio) {
     return next();
   }
 
@@ -107,28 +206,101 @@ app.use('/portfolios', async (req, res, next) => {
   try {
     const cleanPath = req.path.replace(/\.enc$/i, '');
     const filePath = path.join(PORTFOLIOS_DIR, cleanPath);
-    const imageBuffer = await decryptionCache.get(filePath, currentPassword);
+    let fileBuffer = await decryptionCache.get(filePath, currentPassword);
 
     // Determinar tipo MIME basado en la extensión original (sin .enc)
     const ext = path.extname(cleanPath).toLowerCase();
-    let mimeType = 'image/jpeg'; // Default
-    if (ext === '.png') mimeType = 'image/png';
+
+    // REPARACIÓN AUTOMÁTICA DE OPUS (Compatibilidad con Firefox)
+    // Se añade el bit EOS (End Of Stream) al final si falta y se recalcula el CRC
+    if (ext === '.opus') {
+      fileBuffer = repairOpusBuffer(fileBuffer);
+    }
+    let mimeType = 'application/octet-stream';
+    if (ext === '.jpg' || ext === '.jpeg') mimeType = 'image/jpeg';
+    else if (ext === '.png') mimeType = 'image/png';
     else if (ext === '.webp') mimeType = 'image/webp';
     else if (ext === '.gif') mimeType = 'image/gif';
+    else if (ext === '.mp4') mimeType = 'video/mp4';
+    else if (ext === '.webm') mimeType = 'video/webm';
+    else if (ext === '.opus') mimeType = 'audio/ogg; codecs=opus';
+    else if (ext === '.ogg') mimeType = 'audio/ogg';
+    else if (ext === '.mp3') mimeType = 'audio/mpeg';
+    else if (ext === '.wav') mimeType = 'audio/wav';
 
-    // Servir imagen desde memoria
-    res.set('Content-Type', mimeType);
-    res.set('Cache-Control', 'private, max-age=3600'); // Cache del navegador por 1 hora
-    res.send(imageBuffer);
-  } catch (error) {
-    console.error(`❌ Error sirviendo imagen ${req.path}:`, error.message);
+    // Para audio, detectar el formato real por bytes mágicos y ajustar MIME
+    // Esto es necesario porque Firefox es estricto con la concordancia MIME/formato
+    if (isAudio && fileBuffer.length >= 4) {
+      const magic = fileBuffer.slice(0, 4);
+      const isOggMagic = magic.toString('hex') === '4f676753'; // 'OggS'
+      const isWebMMagic = magic[0] === 0x1a && magic[1] === 0x45 && magic[2] === 0xdf && magic[3] === 0xa3;
+      const isMP3Magic = (magic[0] === 0xff && (magic[1] & 0xe0) === 0xe0) || magic.toString('hex').startsWith('494433');
 
-    // Si el archivo no existe o no se puede desencriptar, devolver 404
-    if (error.code === 'ENOENT') {
-      return res.status(404).json({ error: 'Imagen no encontrada' });
+      if (isOggMagic) {
+        // Para archivos .opus (Ogg/Opus), Firefox requiere especificar el codec
+        if (ext === '.opus') {
+          mimeType = 'audio/ogg; codecs=opus';
+        } else {
+          mimeType = 'audio/ogg';
+        }
+      } else if (isWebMMagic) {
+        mimeType = 'audio/webm; codecs=opus';
+      } else if (isMP3Magic) {
+        mimeType = 'audio/mpeg';
+      }
     }
 
-    res.status(500).json({ error: 'Error desencriptando imagen' });
+    if (isVideo || isAudio) {
+      // Soporte de Range requests para streaming de video/audio (necesario para seek)
+      const fileSize = fileBuffer.length;
+      const range = req.headers.range;
+
+      if (range) {
+        const parts = range.replace(/bytes=/, '').split('-');
+        const start = parseInt(parts[0], 10);
+        // Acotar end al tamaño real del fichero (Firefox es estricto con Content-Length)
+        const end = Math.min(
+          parts[1] ? parseInt(parts[1], 10) : fileSize - 1,
+          fileSize - 1
+        );
+        if (start >= fileSize) {
+          res.writeHead(416, { 'Content-Range': `bytes */${fileSize}` });
+          return res.end();
+        }
+        const chunkSize = end - start + 1;
+        const chunk = fileBuffer.slice(start, end + 1);
+
+        res.writeHead(206, {
+          'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+          'Accept-Ranges': 'bytes',
+          'Content-Length': chunkSize,
+          'Content-Type': mimeType,
+          'Cache-Control': 'no-cache',
+        });
+        res.end(chunk);
+      } else {
+        res.writeHead(200, {
+          'Content-Length': fileSize,
+          'Content-Type': mimeType,
+          'Accept-Ranges': 'bytes', // Firefox necesita saber que soportamos rangos
+          'Cache-Control': 'no-cache',
+        });
+        res.end(fileBuffer);
+      }
+    } else {
+      // Imágenes: servir desde memoria con caché
+      res.set('Content-Type', mimeType);
+      res.set('Cache-Control', 'private, max-age=3600');
+      res.send(fileBuffer);
+    }
+  } catch (error) {
+    console.error(`❌ Error sirviendo archivo ${req.path}:`, error.message);
+
+    if (error.code === 'ENOENT') {
+      return res.status(404).json({ error: 'Archivo no encontrado' });
+    }
+
+    res.status(500).json({ error: 'Error desencriptando archivo' });
   }
 });
 
@@ -943,12 +1115,16 @@ app.post('/api/captures', (req, res) => {
 // 3.1. Obtener TODAS las evidencias (para la galería global)
 app.get('/api/captures', (req, res) => {
   db.all(
-    `SELECT 
+    `SELECT
       e.id,
       e.student_id as studentId,
       st.name as studentName,
       s.name as subject,
+      e.subject_id,
       e.file_path as imagePath,
+      e.type,
+      e.thumbnail_path as thumbnailPath,
+      e.duration,
       e.capture_date as timestamp,
       e.confidence,
       e.method,
@@ -972,11 +1148,15 @@ app.get('/api/captures/:studentId', (req, res) => {
   const { studentId } = req.params;
 
   db.all(
-    `SELECT 
+    `SELECT
       e.id,
       e.student_id as studentId,
       s.name as subject,
+      e.subject_id,
       e.file_path as imagePath,
+      e.type,
+      e.thumbnail_path as thumbnailPath,
+      e.duration,
       e.capture_date as timestamp,
       e.confidence,
       e.method,
@@ -1049,7 +1229,7 @@ app.delete('/api/evidences/batch', (req, res) => {
     if (err) return res.status(500).json({ error: err.message });
 
     // Eliminar de BD
-    db.run(`DELETE FROM evidences WHERE id IN (${placeholders})`, ids, function(err) {
+    db.run(`DELETE FROM evidences WHERE id IN (${placeholders})`, ids, function (err) {
       if (err) return res.status(500).json({ error: err.message });
 
       // Eliminar archivos físicos
@@ -2221,6 +2401,16 @@ app.post('/api/sync/push', authenticateSyncRequest, async (req, res) => {
           // Normalizar el filename para comparación
           const incomingFilename = e.filePath.split('/').pop().replace(/\.enc$/i, '');
 
+          // Normalizar thumbnailPath: el móvil envía ruta absoluta local, guardamos solo
+          // el nombre de archivo relativo para que el escritorio pueda servirlo
+          let normalizedThumbnailPath = null;
+          if (e.thumbnailPath) {
+            const thumbFilename = e.thumbnailPath.split('/').pop().replace(/\.enc$/i, '');
+            if (thumbFilename) {
+              normalizedThumbnailPath = `evidences/${thumbFilename}`;
+            }
+          }
+
           // ✅ FIX: Verificar duplicados por ID (primario) y por filename (fallback)
           const existsById = e.id && existingEvidences.byId.has(e.id);
           const existsByFilename = existingEvidences.byFilename.has(incomingFilename);
@@ -2238,11 +2428,13 @@ app.post('/api/sync/push', authenticateSyncRequest, async (req, res) => {
               db.run(
                 `UPDATE evidences SET
                   student_id = ?, course_id = ?, subject_id = ?, type = ?,
-                  file_path = ?, capture_date = ?, confidence = ?, method = ?,
+                  file_path = ?, thumbnail_path = ?, duration = ?,
+                  capture_date = ?, confidence = ?, method = ?,
                   is_reviewed = ?, file_size = ?
                 WHERE id = ?`,
                 [
                   desktopStudentId, e.courseId, e.subjectId, e.type, e.filePath,
+                  normalizedThumbnailPath, e.duration || null,
                   e.captureDate, e.confidence, e.method, e.isReviewed ? 1 : 0,
                   e.fileSize, existing.id
                 ],
@@ -2265,22 +2457,24 @@ app.post('/api/sync/push', authenticateSyncRequest, async (req, res) => {
           const sql = hasId
             ? `INSERT OR REPLACE INTO evidences (
                 id, student_id, course_id, subject_id, type, file_path,
-                capture_date, confidence, method, is_reviewed, file_size
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+                thumbnail_path, duration, capture_date, confidence, method, is_reviewed, file_size
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
             : `INSERT INTO evidences (
                 student_id, course_id, subject_id, type, file_path,
-                capture_date, confidence, method, is_reviewed, file_size
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+                thumbnail_path, duration, capture_date, confidence, method, is_reviewed, file_size
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
 
           const params = hasId
             ? [
-                e.id, desktopStudentId, e.courseId, e.subjectId, e.type, e.filePath,
-                e.captureDate, e.confidence, e.method, e.isReviewed ? 1 : 0, e.fileSize
-              ]
+              e.id, desktopStudentId, e.courseId, e.subjectId, e.type, e.filePath,
+              normalizedThumbnailPath, e.duration || null,
+              e.captureDate, e.confidence, e.method, e.isReviewed ? 1 : 0, e.fileSize
+            ]
             : [
-                desktopStudentId, e.courseId, e.subjectId, e.type, e.filePath,
-                e.captureDate, e.confidence, e.method, e.isReviewed ? 1 : 0, e.fileSize
-              ];
+              desktopStudentId, e.courseId, e.subjectId, e.type, e.filePath,
+              normalizedThumbnailPath, e.duration || null,
+              e.captureDate, e.confidence, e.method, e.isReviewed ? 1 : 0, e.fileSize
+            ];
 
           await new Promise((resolve, reject) => {
             db.run(sql, params, (err) => {
@@ -2391,6 +2585,8 @@ app.get('/api/sync/files/:filename', authenticateSyncRequest, async (req, res) =
     else if (ext === '.png') mimeType = 'image/png';
     else if (ext === '.mp4') mimeType = 'video/mp4';
     else if (ext === '.webm') mimeType = 'video/webm';
+    else if (ext === '.opus') mimeType = 'audio/ogg; codecs=opus';
+    else if (ext === '.ogg') mimeType = 'audio/ogg';
     else if (ext === '.mp3') mimeType = 'audio/mpeg';
     else if (ext === '.wav') mimeType = 'audio/wav';
 
