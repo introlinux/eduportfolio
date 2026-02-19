@@ -2224,7 +2224,7 @@ async function confirmZipExport() {
 }
 
 /**
- * Exportar evidencias con caras pixeladas en un ZIP sin contraseña
+ * Exportar evidencias con caras ocultas en un ZIP sin contraseña
  * @param {Array<number>} ids - IDs de las evidencias a exportar
  */
 async function exportPixelatedEvidences(ids) {
@@ -2258,8 +2258,8 @@ async function exportPixelatedEvidences(ids) {
       await faceRecognitionService.initialize();
     }
 
-    // Paso 3: Procesar cada imagen (detectar y pixelar caras)
-    showNotification(`🎭 Pixelando caras (0/${images.length})...`, 'info');
+    // Paso 3: Procesar cada imagen (detectar y ocultar caras con emojis)
+    showNotification(`🎭 Ocultando caras (0/${images.length})...`, 'info');
 
     const zip = new JSZip();
     let processedCount = 0;
@@ -2276,17 +2276,17 @@ async function exportPixelatedEvidences(ids) {
 
         console.log(`🖼️ Procesando: ${imgData.fileName}`);
 
-        // Pixelar caras (tamaño de píxel: 25 para máxima privacidad)
-        const pixelatedDataUrl = await pixelateFaces(img, 25);
+        // Ocultar caras con emojis
+        const processedDataUrl = await pixelateFaces(img);
 
         // Convertir a blob
-        const blob = await fetch(pixelatedDataUrl).then(r => r.blob());
+        const blob = await fetch(processedDataUrl).then(r => r.blob());
 
         // Agregar al ZIP
         zip.file(imgData.fileName, blob);
 
         processedCount++;
-        showNotification(`🎭 Pixelando caras (${processedCount}/${images.length})...`, 'info');
+        showNotification(`🎭 Ocultando caras (${processedCount}/${images.length})...`, 'info');
       } catch (error) {
         console.error(`Error procesando ${imgData.fileName}:`, error);
       }
@@ -2305,7 +2305,7 @@ async function exportPixelatedEvidences(ids) {
     const url = URL.createObjectURL(zipBlob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `evidencias_pixeladas_${new Date().toISOString().split('T')[0]}.zip`;
+    a.download = `evidencias_anonimizadas_${new Date().toISOString().split('T')[0]}.zip`;
     document.body.appendChild(a);
     a.click();
     URL.revokeObjectURL(url);
@@ -2314,12 +2314,12 @@ async function exportPixelatedEvidences(ids) {
     showNotification(`✅ ZIP descargado con ${processedCount} imágenes`, 'success');
     deselectAll();
   } catch (error) {
-    console.error('Error en exportación pixelada:', error);
+    console.error('Error en exportación con caras ocultas:', error);
     showNotification('❌ Error al exportar', 'error');
   }
 }
 
-// ==================== FUNCIONES DE PIXELADO DE CARAS ====================
+// ==================== FUNCIONES DE OCULTACIÓN DE CARAS ====================
 
 function togglePasswordFields() {
   const exportType = document.querySelector('input[name="exportType"]:checked').value;
@@ -2333,15 +2333,14 @@ function togglePasswordFields() {
 }
 
 /**
- * Pixelar una región específica del canvas (efecto mosaico)
+ * Cubrir una cara con un emoji
  * @param {CanvasRenderingContext2D} ctx - Contexto del canvas
  * @param {number} x - Posición X inicial
  * @param {number} y - Posición Y inicial
  * @param {number} width - Ancho de la región
  * @param {number} height - Alto de la región
- * @param {number} blockSize - Tamaño del píxel del mosaico
  */
-function pixelateRegion(ctx, x, y, width, height, blockSize = 15) {
+function addEmojiOverFace(ctx, x, y, width, height) {
   // Asegurar que las coordenadas estén dentro del canvas
   x = Math.max(0, Math.floor(x));
   y = Math.max(0, Math.floor(y));
@@ -2349,39 +2348,35 @@ function pixelateRegion(ctx, x, y, width, height, blockSize = 15) {
   height = Math.floor(height);
 
   // Expandir un poco el área para cubrir mejor la cara
-  const padding = blockSize * 2;
+  const padding = width * 0.15; // 15% de padding
   x = Math.max(0, x - padding);
   y = Math.max(0, y - padding);
   width = width + padding * 2;
   height = height + padding * 2;
 
-  // Crear efecto mosaico
-  for (let px = x; px < x + width; px += blockSize) {
-    for (let py = y; py < y + height; py += blockSize) {
-      // Obtener el color del pixel central del bloque
-      const sampleX = Math.min(px + Math.floor(blockSize / 2), ctx.canvas.width - 1);
-      const sampleY = Math.min(py + Math.floor(blockSize / 2), ctx.canvas.height - 1);
+  // Calcular el tamaño del emoji (usa el mayor entre ancho y alto para cubrir bien)
+  const emojiSize = Math.max(width, height);
 
-      try {
-        const pixelData = ctx.getImageData(sampleX, sampleY, 1, 1).data;
-        ctx.fillStyle = `rgb(${pixelData[0]},${pixelData[1]},${pixelData[2]})`;
+  // Lista de emojis de caras disponibles (rotación aleatoria para variedad)
+  const faceEmojis = ['😊', '🙂', '😎', '🤗', '😺', '🐱', '🎭', '👤'];
+  const emoji = faceEmojis[Math.floor(Math.random() * faceEmojis.length)];
 
-        // Dibujar bloque
-        const blockWidth = Math.min(blockSize, ctx.canvas.width - px);
-        const blockHeight = Math.min(blockSize, ctx.canvas.height - py);
-        ctx.fillRect(px, py, blockWidth, blockHeight);
-      } catch (e) {
-        // Ignorar errores en bordes
-      }
-    }
-  }
+  // Configurar el estilo del texto
+  ctx.font = `${emojiSize}px Arial`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  // Dibujar el emoji centrado en la región de la cara
+  const centerX = x + width / 2;
+  const centerY = y + height / 2;
+  ctx.fillText(emoji, centerX, centerY);
 }
 
 /**
- * Detectar caras y pixelarlas en una imagen
+ * Detectar caras y cubrirlas con emojis en una imagen
  * @param {HTMLImageElement} imageElement - Elemento de imagen
- * @param {number} pixelSize - Tamaño del píxel (bloques)
- * @returns {Promise<string>} - Data URL de la imagen pixelada
+ * @param {number} pixelSize - Parámetro legacy, ya no se usa (se mantiene por compatibilidad)
+ * @returns {Promise<string>} - Data URL de la imagen con caras cubiertas
  */
 async function pixelateFaces(imageElement, pixelSize = 15) {
   // Crear canvas
@@ -2412,11 +2407,11 @@ async function pixelateFaces(imageElement, pixelSize = 15) {
 
     console.log(`🎭 Detectadas ${detections.length} cara(s) en la imagen`);
 
-    // Pixelar cada cara detectada
+    // Cubrir cada cara detectada con un emoji
     detections.forEach((detection, index) => {
       const box = detection.detection.box;
-      console.log(`  → Pixelando cara ${index + 1}: x=${Math.floor(box.x)}, y=${Math.floor(box.y)}, w=${Math.floor(box.width)}, h=${Math.floor(box.height)}`);
-      pixelateRegion(ctx, box.x, box.y, box.width, box.height, pixelSize);
+      console.log(`  → Cubriendo cara ${index + 1} con emoji: x=${Math.floor(box.x)}, y=${Math.floor(box.y)}, w=${Math.floor(box.width)}, h=${Math.floor(box.height)}`);
+      addEmojiOverFace(ctx, box.x, box.y, box.width, box.height);
     });
 
     if (detections.length === 0) {
