@@ -27,7 +27,7 @@ let selectedEvidences = new Set(); // IDs de evidencias seleccionadas
 let selectionMode = false; // true cuando está activo el modo selección
 let lastSelectedIndex = -1; // Para selección con Shift
 
-const API_URL = 'http://localhost:3000/api';
+const API_URL = '/api';
 
 // ==================== OPENCV (No se usa en tiempo real en Fase 3) ====================
 let cvReady = false;
